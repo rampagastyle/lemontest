@@ -7,8 +7,11 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database import db, SoldOutError, AlreadyHasTicketError
-from keyboards import main_menu, admin_menu, events_list_keyboard, event_detail_keyboard, confirm_purchase_keyboard
+from database import db, SoldOutError
+from keyboards import (
+    main_menu, admin_menu, events_list_keyboard, event_detail_keyboard,
+    confirm_purchase_keyboard, my_tickets_events_keyboard, ticket_keyboard
+)
 from utils import generate_unique_ticket_code, make_ticket_qr
 from utils.formatting import TIER_LABELS, event_price, ticket_kind
 import config
@@ -20,7 +23,7 @@ router = Router()
 # то ожидание отменяется, а не отправляется в поддержку как «вопрос».
 MENU_TEXTS = {
     "🎫 Мероприятия", "🎟 Мои билеты", "💬 Поддержка", "ℹ️ О боте",
-    "➕ Создать событие", "🎁 Выдать билет", "📊 Статистика",
+    "➕ Создать событие", "📋 Управление", "🎁 Выдать билет", "📊 Статистика",
     "✅ Проверка билетов", "⏹ Выключить проверку", "👥 Добавить админа",
 }
 
@@ -108,16 +111,28 @@ async def process_buy_ticket(callback: CallbackQuery):
         await callback.answer("❌ Билеты закончились", show_alert=True)
         return
 
+    already = await db.count_user_tickets_for_event(callback.from_user.id, event_id)
+
+    warn = ""
+    if already > 0:
+        warn = (
+            f"\n⚠️ У вас уже есть {already} билет(а/ов) на это мероприятие.\n"
+            "Вы можете купить ещё один.\n"
+        )
+
     text = (
         "🎫 Покупка билета (ТЕСТОВЫЙ РЕЖИМ)\n\n"
         f"Мероприятие: {event['name']}\n"
         f"Вариант: {TIER_LABELS[tier]}\n"
-        f"Цена: {event_price(event, tier)}₽\n\n"
+        f"Цена: {event_price(event, tier)}₽\n"
+        f"{warn}\n"
         "⚠️ Это тестовая покупка — оплата не требуется!\n"
         "Просто подтвердите получение билета."
     )
 
-    await callback.message.edit_text(text, reply_markup=confirm_purchase_keyboard(event_id, tier))
+    await callback.message.edit_text(
+        text, reply_markup=confirm_purchase_keyboard(event_id, tier, already_has=already)
+    )
     await callback.answer()
 
 
@@ -145,10 +160,6 @@ async def confirm_purchase(callback: CallbackQuery):
         )
     except SoldOutError:
         await callback.answer("❌ Билеты закончились", show_alert=True)
-        return
-    except AlreadyHasTicketError:
-        await callback.answer("ℹ️ У вас уже есть билет на это мероприятие. Он в разделе «Мои билеты».",
-                              show_alert=True)
         return
     except Exception:
         logger.exception("Ticket creation error")
@@ -188,6 +199,7 @@ async def back_to_events(callback: CallbackQuery):
 @router.message(F.text == "🎟 Мои билеты")
 @router.callback_query(F.data == "my_tickets")
 async def show_my_tickets(event):
+    """Показывает список мероприятий, на которые есть билеты."""
     user_id = event.from_user.id
 
     if isinstance(event, CallbackQuery):
@@ -197,9 +209,9 @@ async def show_my_tickets(event):
         message = event
         is_callback = False
 
-    tickets = await db.get_user_tickets(user_id)
+    events = await db.get_user_events_with_tickets(user_id)
 
-    if not tickets:
+    if not events:
         text = "У вас пока нет билетов. Купите билет на мероприятие!"
         if is_callback:
             await message.edit_text(text)
@@ -208,25 +220,52 @@ async def show_my_tickets(event):
             await message.answer(text)
         return
 
-    for ticket in tickets:
-        date_str = ticket['event_date'].strftime("%d.%m.%Y %H:%M")
-        status = "✅ Использован" if ticket['used_at'] else "🎫 Активен"
+    text = "🎟 Ваши билеты\n\nВыберите мероприятие:"
+    kb = my_tickets_events_keyboard(events)
 
+    if is_callback:
+        await message.edit_text(text, reply_markup=kb)
+        await event.answer()
+    else:
+        await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.regexp(r"^my_tickets_event_\d+$"))
+async def show_tickets_for_event(callback: CallbackQuery):
+    """Показывает все билеты пользователя на выбранное мероприятие."""
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    user_id = callback.from_user.id
+
+    tickets = await db.get_user_tickets_for_event(user_id, event_id)
+    if not tickets:
+        await callback.answer("Билетов не найдено", show_alert=True)
+        return
+
+    event_name = tickets[0]['event_name']
+    date_str = tickets[0]['event_date'].strftime("%d.%m.%Y %H:%M")
+
+    await callback.message.edit_text(
+        f"🎟 Билеты на «{html.escape(event_name)}»\n📅 {date_str}\n\n"
+        f"Всего: {len(tickets)}. Отправляю QR-коды…"
+    )
+    await callback.answer()
+
+    for i, ticket in enumerate(tickets, 1):
+        status = "✅ Использован" if ticket['used_at'] else "🎫 Активен"
         text = (
             f"🎉 {html.escape(ticket['event_name'])}\n"
             f"📅 {date_str}\n\n"
+            f"Билет {i}/{len(tickets)}\n"
             f"Статус: {status}\n"
             f"Тип: {ticket_kind(ticket)}\n"
             f"Код: <code>{ticket['qr_code']}</code>"
         )
-
-        qr_image = await make_ticket_qr(message.bot, ticket['qr_code'])
+        qr_image = await make_ticket_qr(callback.bot, ticket['qr_code'])
         photo = BufferedInputFile(qr_image.read(), filename="ticket_qr.png")
-        await message.answer_photo(photo=photo, caption=text, parse_mode="HTML")
-
-    if is_callback:
-        await message.delete()
-        await event.answer()
+        await callback.message.answer_photo(
+            photo=photo, caption=text, parse_mode="HTML",
+            reply_markup=ticket_keyboard() if i == len(tickets) else None
+        )
 
 
 @router.message(F.text == "ℹ️ О боте")

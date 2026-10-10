@@ -17,9 +17,10 @@ def admin_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🎫 Мероприятия"), KeyboardButton(text="🎟 Мои билеты")],
-            [KeyboardButton(text="➕ Создать событие"), KeyboardButton(text="🎁 Выдать билет")],
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="✅ Проверка билетов")],
-            [KeyboardButton(text="👥 Добавить админа"), KeyboardButton(text="💬 Поддержка")]
+            [KeyboardButton(text="➕ Создать событие"), KeyboardButton(text="📋 Управление")],
+            [KeyboardButton(text="🎁 Выдать билет"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="✅ Проверка билетов"), KeyboardButton(text="👥 Добавить админа")],
+            [KeyboardButton(text="💬 Поддержка")]
         ],
         resize_keyboard=True
     )
@@ -62,16 +63,61 @@ def event_detail_keyboard(event, is_admin=False):
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def confirm_purchase_keyboard(event_id, tier):
-    return InlineKeyboardMarkup(inline_keyboard=[
+def confirm_purchase_keyboard(event_id, tier, already_has: int = 0):
+    """Клавиатура подтверждения. already_has — сколько билетов уже есть (для предупреждения)."""
+    buttons = [
         [InlineKeyboardButton(text="✅ Подтвердить (ТЕСТ)", callback_data=f"confirm_buy_{event_id}_{tier}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"event_{event_id}")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def my_tickets_events_keyboard(events):
+    """Список мероприятий, на которые у пользователя есть билеты."""
+    buttons = []
+    for event in events:
+        count = event.get('tickets_count', 0)
+        label = f"{event['name']} ({count})"
+        buttons.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"my_tickets_event_{event['id']}"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def ticket_keyboard(ticket_id=None):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К билетам", callback_data="my_tickets")]
     ])
 
 
-def ticket_keyboard(ticket_id):
+def manage_events_keyboard(events):
+    """Список всех мероприятий для управления."""
+    buttons = []
+    for event in events:
+        status = "✅" if event.get('is_active') else "⏸"
+        date_str = event['date'].strftime("%d.%m") if event.get('date') else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"{status} {event['name']} ({date_str})",
+            callback_data=f"manage_event_{event['id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Закрыть", callback_data="close_manage")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def manage_event_actions_keyboard(event):
+    """Действия над одним мероприятием."""
+    event_id = event['id']
+    active = event.get('is_active', True)
+    toggle_text = "⏸ Деактивировать" if active else "✅ Активировать"
+    toggle_data = f"toggle_event_{event_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ К билетам", callback_data="my_tickets")]
+        [InlineKeyboardButton(text=toggle_text, callback_data=toggle_data)],
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_name_{event_id}")],
+        [InlineKeyboardButton(text="📅 Изменить дату", callback_data=f"edit_date_{event_id}")],
+        [InlineKeyboardButton(text="💰 Изменить цены", callback_data=f"edit_prices_{event_id}")],
+        [InlineKeyboardButton(text="🎫 Добавить билеты", callback_data=f"add_tickets_{event_id}")],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="manage_events_list")],
     ])
 
 

@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from database import db, SoldOutError
-from keyboards import stats_menu_keyboard
+from keyboards import stats_menu_keyboard, manage_events_keyboard, manage_event_actions_keyboard, admin_menu
 from utils import generate_unique_ticket_code, make_ticket_qr
 import config
 
@@ -34,6 +34,14 @@ class AddAdmin(StatesGroup):
 class GiftTicket(StatesGroup):
     event_id = State()
     waiting_for_user = State()
+
+
+class EditEvent(StatesGroup):
+    waiting_name = State()
+    waiting_date = State()
+    waiting_price_list = State()
+    waiting_price_nolist = State()
+    waiting_add_tickets = State()
 
 
 # ---------- Проверка прав ----------
@@ -458,3 +466,258 @@ async def process_add_admin(message: Message, state: FSMContext):
     await db.add_admin(user_id, username)
     await state.clear()
     await message.answer(f"✅ Пользователь {user_id} добавлен в список администраторов")
+
+
+# ---------- Управление мероприятиями ----------
+
+@router.message(F.text == "📋 Управление")
+async def manage_events_menu(message: Message):
+    if not await is_admin_filter(message):
+        await message.answer("❌ У вас нет прав администратора")
+        return
+
+    events = await db.get_all_events()
+    if not events:
+        await message.answer("📋 Нет мероприятий. Создайте первое через «➕ Создать событие».")
+        return
+
+    await message.answer(
+        "📋 Управление мероприятиями\n\nВыберите событие:",
+        reply_markup=manage_events_keyboard(events)
+    )
+
+
+@router.callback_query(F.data == "manage_events_list")
+async def manage_events_list_cb(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+
+    events = await db.get_all_events()
+    if not events:
+        await callback.message.edit_text("📋 Нет мероприятий.")
+        await callback.answer()
+        return
+
+    await callback.message.edit_text(
+        "📋 Управление мероприятиями\n\nВыберите событие:",
+        reply_markup=manage_events_keyboard(events)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "close_manage")
+async def close_manage(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+    await callback.message.delete()
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^manage_event_\d+$"))
+async def manage_event_detail(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    event = await db.get_event(event_id)
+    if not event:
+        await callback.answer("❌ Не найдено", show_alert=True)
+        return
+
+    date_str = event['date'].strftime("%d.%m.%Y %H:%M")
+    status = "активно ✅" if event.get('is_active') else "неактивно ⏸"
+    text = (
+        f"📋 {event['name']}\n\n"
+        f"📅 {date_str}\n"
+        f"Статус: {status}\n"
+        f"📋 По списку: {event.get('price_list') or '—'}₽\n"
+        f"🚪 Без списка: {event.get('price_nolist') or '—'}₽\n"
+        f"🎫 Осталось: {event['available_tickets']} / {event['total_tickets']}\n"
+    )
+    if event.get('post_url'):
+        text += f"🔗 {event['post_url']}\n"
+
+    await callback.message.edit_text(text, reply_markup=manage_event_actions_keyboard(event))
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^toggle_event_\d+$"))
+async def toggle_event_active(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    event = await db.get_event(event_id)
+    if not event:
+        await callback.answer("❌ Не найдено", show_alert=True)
+        return
+
+    new_active = not event.get('is_active', True)
+    await db.set_event_active(event_id, new_active)
+    event = await db.get_event(event_id)
+
+    status_word = "активировано" if new_active else "деактивировано"
+    await callback.answer(f"✅ Мероприятие {status_word}")
+
+    date_str = event['date'].strftime("%d.%m.%Y %H:%M")
+    status = "активно ✅" if event.get('is_active') else "неактивно ⏸"
+    text = (
+        f"📋 {event['name']}\n\n"
+        f"📅 {date_str}\n"
+        f"Статус: {status}\n"
+        f"📋 По списку: {event.get('price_list') or '—'}₽\n"
+        f"🚪 Без списка: {event.get('price_nolist') or '—'}₽\n"
+        f"🎫 Осталось: {event['available_tickets']} / {event['total_tickets']}\n"
+    )
+    if event.get('post_url'):
+        text += f"🔗 {event['post_url']}\n"
+
+    await callback.message.edit_text(text, reply_markup=manage_event_actions_keyboard(event))
+
+
+@router.callback_query(F.data.regexp(r"^edit_name_\d+$"))
+async def start_edit_name(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    await state.update_data(edit_event_id=event_id)
+    await state.set_state(EditEvent.waiting_name)
+    await callback.message.answer("✏️ Введите новое название мероприятия:")
+    await callback.answer()
+
+
+@router.message(EditEvent.waiting_name, F.text)
+async def process_edit_name(message: Message, state: FSMContext):
+    if not await is_admin_filter(message):
+        await state.clear()
+        return
+    data = await state.get_data()
+    event_id = data.get('edit_event_id')
+    name = message.text.strip()
+    if not name or len(name) > 200:
+        await message.answer("❌ Название должно быть от 1 до 200 символов")
+        return
+    await db.update_event(event_id, name=name)
+    await state.clear()
+    await message.answer(f"✅ Название обновлено: {name}", reply_markup=admin_menu())
+
+
+@router.callback_query(F.data.regexp(r"^edit_date_\d+$"))
+async def start_edit_date(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    await state.update_data(edit_event_id=event_id)
+    await state.set_state(EditEvent.waiting_date)
+    await callback.message.answer(
+        "📅 Введите новую дату и время в формате ДД.ММ.ГГГГ ЧЧ:ММ\n"
+        "Например: 15.11.2026 20:00"
+    )
+    await callback.answer()
+
+
+@router.message(EditEvent.waiting_date, F.text)
+async def process_edit_date(message: Message, state: FSMContext):
+    if not await is_admin_filter(message):
+        await state.clear()
+        return
+    data = await state.get_data()
+    event_id = data.get('edit_event_id')
+    try:
+        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        await message.answer("❌ Неверный формат. Пример: 15.11.2026 20:00")
+        return
+    await db.update_event(event_id, date=dt)
+    await state.clear()
+    await message.answer(
+        f"✅ Дата обновлена: {dt.strftime('%d.%m.%Y %H:%M')}",
+        reply_markup=admin_menu()
+    )
+
+
+@router.callback_query(F.data.regexp(r"^edit_prices_\d+$"))
+async def start_edit_prices(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    await state.update_data(edit_event_id=event_id)
+    await state.set_state(EditEvent.waiting_price_list)
+    await callback.message.answer("💰 Введите цену «По списку» (число в рублях):")
+    await callback.answer()
+
+
+@router.message(EditEvent.waiting_price_list, F.text)
+async def process_edit_price_list(message: Message, state: FSMContext):
+    if not await is_admin_filter(message):
+        await state.clear()
+        return
+    price = parse_price(message.text)
+    if price is None:
+        await message.answer("❌ Введите целое число")
+        return
+    await state.update_data(price_list=price)
+    await state.set_state(EditEvent.waiting_price_nolist)
+    await message.answer("💰 Введите цену «Без списка» (число в рублях):")
+
+
+@router.message(EditEvent.waiting_price_nolist, F.text)
+async def process_edit_price_nolist(message: Message, state: FSMContext):
+    if not await is_admin_filter(message):
+        await state.clear()
+        return
+    price = parse_price(message.text)
+    if price is None:
+        await message.answer("❌ Введите целое число")
+        return
+    data = await state.get_data()
+    event_id = data.get('edit_event_id')
+    await db.update_event(event_id, price_list=data['price_list'], price_nolist=price)
+    await state.clear()
+    await message.answer(
+        f"✅ Цены обновлены:\n📋 По списку — {data['price_list']}₽\n🚪 Без списка — {price}₽",
+        reply_markup=admin_menu()
+    )
+
+
+@router.callback_query(F.data.regexp(r"^add_tickets_\d+$"))
+async def start_add_tickets(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    await state.update_data(edit_event_id=event_id)
+    await state.set_state(EditEvent.waiting_add_tickets)
+    await callback.message.answer("🎫 Сколько билетов добавить? (целое число)")
+    await callback.answer()
+
+
+@router.message(EditEvent.waiting_add_tickets, F.text)
+async def process_add_tickets(message: Message, state: FSMContext):
+    if not await is_admin_filter(message):
+        await state.clear()
+        return
+    count = parse_price(message.text)
+    if not count or count <= 0:
+        await message.answer("❌ Введите целое число больше 0")
+        return
+    data = await state.get_data()
+    event_id = data.get('edit_event_id')
+    ok = await db.add_tickets_to_event(event_id, count)
+    await state.clear()
+    if ok:
+        event = await db.get_event(event_id)
+        await message.answer(
+            f"✅ Добавлено {count} билетов.\n"
+            f"Теперь: {event['available_tickets']} / {event['total_tickets']}",
+            reply_markup=admin_menu()
+        )
+    else:
+        await message.answer("❌ Не удалось обновить", reply_markup=admin_menu())
