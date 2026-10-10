@@ -50,10 +50,12 @@ class Database:
                     user_id BIGINT NOT NULL,
                     username TEXT,
                     qr_code TEXT UNIQUE NOT NULL,
-                    payment_id TEXT UNIQUE,
-                    status TEXT DEFAULT 'pending',
-                    purchased_at TIMESTAMP DEFAULT NOW(),
-                    used_at TIMESTAMP
+                    ticket_type TEXT DEFAULT 'purchased',
+                    gifted_by BIGINT,
+                    status TEXT DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    used_at TIMESTAMP,
+                    used_by_admin BIGINT
                 )
             ''')
 
@@ -107,14 +109,14 @@ class Database:
             return dict(row) if row else None
 
     async def create_ticket(self, event_id: int, user_id: int, username: str,
-                           qr_code: str, payment_id: str) -> int:
+                           qr_code: str, ticket_type: str = 'purchased', gifted_by: int = None) -> int:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 ticket_id = await conn.fetchval('''
-                    INSERT INTO tickets (event_id, user_id, username, qr_code, payment_id, status)
-                    VALUES ($1, $2, $3, $4, $5, 'paid')
+                    INSERT INTO tickets (event_id, user_id, username, qr_code, ticket_type, gifted_by, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, 'active')
                     RETURNING id
-                ''', event_id, user_id, username, qr_code, payment_id)
+                ''', event_id, user_id, username, qr_code, ticket_type, gifted_by)
 
                 await conn.execute('''
                     UPDATE events
@@ -130,30 +132,75 @@ class Database:
                 SELECT t.*, e.name as event_name, e.date as event_date, e.location
                 FROM tickets t
                 JOIN events e ON t.event_id = e.id
-                WHERE t.user_id = $1 AND t.status = 'paid'
+                WHERE t.user_id = $1 AND t.status = 'active'
                 ORDER BY e.date DESC
             ''')
             return [dict(row) for row in rows]
 
-    async def validate_ticket(self, qr_code: str) -> Optional[dict]:
+    async def validate_and_use_ticket(self, qr_code: str, admin_id: int) -> Optional[dict]:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 ticket = await conn.fetchrow('''
-                    SELECT t.*, e.name as event_name, e.date as event_date
+                    SELECT t.*, e.name as event_name, e.date as event_date, u.username as user_name
                     FROM tickets t
                     JOIN events e ON t.event_id = e.id
+                    LEFT JOIN admins u ON t.user_id = u.user_id
                     WHERE t.qr_code = $1
                 ''', qr_code)
 
-                if ticket and ticket['status'] == 'paid' and not ticket['used_at']:
+                if ticket and ticket['status'] == 'active' and not ticket['used_at']:
                     await conn.execute('''
                         UPDATE tickets
-                        SET used_at = NOW()
+                        SET used_at = NOW(), used_by_admin = $2
                         WHERE qr_code = $1
-                    ''', qr_code)
-                    return dict(ticket)
+                    ''', qr_code, admin_id)
+                    result = dict(ticket)
+                    result['just_used'] = True
+                    return result
+                elif ticket:
+                    result = dict(ticket)
+                    result['just_used'] = False
+                    return result
 
-                return dict(ticket) if ticket else None
+                return None
+
+    async def get_event_statistics(self, event_id: int) -> dict:
+        async with self.pool.acquire() as conn:
+            stats = await conn.fetchrow('''
+                SELECT
+                    COUNT(*) FILTER (WHERE ticket_type = 'purchased') as purchased_count,
+                    COUNT(*) FILTER (WHERE ticket_type = 'gifted') as gifted_count,
+                    COUNT(*) FILTER (WHERE used_at IS NOT NULL) as used_count,
+                    COUNT(*) as total_sold,
+                    SUM(CASE WHEN ticket_type = 'purchased' THEN
+                        (SELECT price FROM events WHERE id = $1) ELSE 0 END) as revenue
+                FROM tickets
+                WHERE event_id = $1 AND status = 'active'
+            ''', event_id)
+            return dict(stats) if stats else {}
+
+    async def get_all_statistics(self) -> List[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT
+                    e.id,
+                    e.name,
+                    e.date,
+                    e.price,
+                    e.total_tickets,
+                    e.available_tickets,
+                    COUNT(t.id) FILTER (WHERE t.ticket_type = 'purchased') as purchased_count,
+                    COUNT(t.id) FILTER (WHERE t.ticket_type = 'gifted') as gifted_count,
+                    COUNT(t.id) FILTER (WHERE t.used_at IS NOT NULL) as used_count,
+                    COUNT(t.id) as total_sold,
+                    SUM(CASE WHEN t.ticket_type = 'purchased' THEN e.price ELSE 0 END) as revenue
+                FROM events e
+                LEFT JOIN tickets t ON e.id = t.event_id AND t.status = 'active'
+                WHERE e.is_active = TRUE
+                GROUP BY e.id
+                ORDER BY e.date ASC
+            ''')
+            return [dict(row) for row in rows]
 
     async def create_support_request(self, user_id: int, username: str, message: str) -> int:
         async with self.pool.acquire() as conn:

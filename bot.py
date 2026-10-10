@@ -5,7 +5,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from database import db
-from handlers import user_handlers, admin_handlers, payment_handlers
+from handlers import user_handlers, admin_handlers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,14 +18,13 @@ async def main():
 
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
-    dp.include_router(payment_handlers.router)
 
     await db.connect()
 
     for admin_id in config.ADMIN_IDS:
         await db.add_admin(admin_id)
 
-    logger.info("🍋 LEMON Tickets bot started!")
+    logger.info("🍋 LEMON Tickets TEST bot started!")
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
