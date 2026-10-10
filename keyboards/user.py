@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
+from utils.formatting import price_range, event_price, TIER_LIST, TIER_NOLIST
+
 
 def main_menu():
     return ReplyKeyboardMarkup(
@@ -16,9 +18,17 @@ def admin_menu():
         keyboard=[
             [KeyboardButton(text="🎫 Мероприятия"), KeyboardButton(text="🎟 Мои билеты")],
             [KeyboardButton(text="➕ Создать событие"), KeyboardButton(text="🎁 Выдать билет")],
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="✅ Проверить билет")],
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="✅ Проверка билетов")],
             [KeyboardButton(text="👥 Добавить админа"), KeyboardButton(text="💬 Поддержка")]
         ],
+        resize_keyboard=True
+    )
+
+
+def scan_menu():
+    """Клавиатура, пока включён режим проверки билетов."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⏹ Выключить проверку")]],
         resize_keyboard=True
     )
 
@@ -27,24 +37,35 @@ def events_list_keyboard(events):
     buttons = []
     for event in events:
         buttons.append([InlineKeyboardButton(
-            text=f"{event['name']} - {event['price']}₽",
+            text=f"{event['name']} — {price_range(event)}",
             callback_data=f"event_{event['id']}"
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def event_detail_keyboard(event_id, is_admin=False):
-    buttons = [[InlineKeyboardButton(text="🎫 Купить билет (ТЕСТ)", callback_data=f"buy_{event_id}")]]
+def event_detail_keyboard(event, is_admin=False):
+    event_id = event['id']
+    buttons = []
+    if event.get('post_url'):
+        buttons.append([InlineKeyboardButton(text="🔗 Пост о мероприятии", url=event['post_url'])])
+    buttons.append([InlineKeyboardButton(
+        text=f"📋 По списку — {event_price(event, TIER_LIST)}₽",
+        callback_data=f"buy_{event_id}_{TIER_LIST}"
+    )])
+    buttons.append([InlineKeyboardButton(
+        text=f"🚪 Без списка — {event_price(event, TIER_NOLIST)}₽",
+        callback_data=f"buy_{event_id}_{TIER_NOLIST}"
+    )])
     if is_admin:
         buttons.append([InlineKeyboardButton(text="🎁 Подарить билет", callback_data=f"gift_{event_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_events")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def confirm_purchase_keyboard(event_id):
+def confirm_purchase_keyboard(event_id, tier):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить покупку (ТЕСТ)", callback_data=f"confirm_buy_{event_id}")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_to_events")]
+        [InlineKeyboardButton(text="✅ Подтвердить (ТЕСТ)", callback_data=f"confirm_buy_{event_id}_{tier}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"event_{event_id}")]
     ])
 
 

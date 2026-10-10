@@ -1,3 +1,3 @@
-from .models import db
+from .models import db, SoldOutError, AlreadyHasTicketError
 
-__all__ = ['db']
+__all__ = ['db', 'SoldOutError', 'AlreadyHasTicketError']

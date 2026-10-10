@@ -1,24 +1,29 @@
+import html
+import logging
+import re
+from datetime import datetime, timedelta
+from typing import Optional, Tuple
+
 from aiogram import Router, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, MessageOriginUser
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from datetime import datetime
 
-from database import db
+from database import db, SoldOutError
 from keyboards import stats_menu_keyboard
-from utils import generate_unique_ticket_code, generate_qr_code
+from utils import generate_unique_ticket_code, make_ticket_qr
 import config
 
+logger = logging.getLogger(__name__)
 router = Router()
 
 
 class CreateEvent(StatesGroup):
     name = State()
-    description = State()
     date = State()
-    location = State()
-    price = State()
+    post_url = State()
+    price_list = State()
+    price_nolist = State()
     total_tickets = State()
 
 
@@ -31,13 +36,55 @@ class GiftTicket(StatesGroup):
     waiting_for_user = State()
 
 
-class CheckTicket(StatesGroup):
-    waiting_for_code = State()
+# ---------- Проверка прав ----------
+
+async def is_admin_id(user_id: int) -> bool:
+    return await db.is_admin(user_id)
 
 
 async def is_admin_filter(message: Message) -> bool:
-    return await db.is_admin(message.from_user.id) or message.from_user.id in config.ADMIN_IDS
+    return await is_admin_id(message.from_user.id)
 
+
+def extract_target_user(message: Message) -> Optional[Tuple[int, Optional[str]]]:
+    """Достаёт (user_id, username) из пересланного сообщения или из числового ID в тексте."""
+    origin = message.forward_origin
+    if isinstance(origin, MessageOriginUser):
+        return origin.sender_user.id, origin.sender_user.username
+    if message.text and message.text.strip().isdigit():
+        return int(message.text.strip()), None
+    return None
+
+
+TARGET_USER_ERROR = (
+    "❌ Не удалось определить пользователя.\n"
+    "Отправьте числовой ID или перешлите сообщение пользователя "
+    "(если у него скрыт профиль, пересылка не сработает — используйте ID)."
+)
+
+TG_LINK_RE = re.compile(r"^(?:https?://)?(?:t|telegram)\.me/\S+$", re.IGNORECASE)
+TG_HANDLE_RE = re.compile(r"^@(\w{4,})$")
+
+
+def normalize_tg_link(text: str) -> Optional[str]:
+    """Принимает ссылку на пост/канал Telegram или @канал, возвращает https-ссылку (или None)."""
+    text = (text or "").strip()
+    handle = TG_HANDLE_RE.match(text)
+    if handle:
+        return f"https://t.me/{handle.group(1)}"
+    if not TG_LINK_RE.match(text):
+        return None
+    if not text.lower().startswith("http"):
+        text = "https://" + text
+    return text
+
+
+def parse_price(text: str) -> Optional[int]:
+    text = (text or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+# ---------- Создание события (минимум полей) ----------
 
 @router.message(F.text == "➕ Создать событие")
 async def start_create_event(message: Message, state: FSMContext):
@@ -46,73 +93,101 @@ async def start_create_event(message: Message, state: FSMContext):
         return
 
     await state.set_state(CreateEvent.name)
-    await message.answer("📝 Введите название мероприятия:")
+    await message.answer("📝 Название мероприятия:")
 
 
-@router.message(CreateEvent.name)
+@router.message(CreateEvent.name, F.text)
 async def process_event_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await state.set_state(CreateEvent.description)
-    await message.answer("📄 Введите описание мероприятия:")
-
-
-@router.message(CreateEvent.description)
-async def process_event_description(message: Message, state: FSMContext):
-    await state.update_data(description=message.text)
+    await state.update_data(name=message.text.strip())
     await state.set_state(CreateEvent.date)
-    await message.answer("📅 Введите дату и время в формате: ДД.ММ.ГГГГ ЧЧ:ММ\nНапример: 25.12.2024 19:00")
+    example = (datetime.now() + timedelta(days=7)).strftime("%d.%m.%Y 20:00")
+    await message.answer(f"📅 Дата и время: ДД.ММ.ГГГГ ЧЧ:ММ\nНапример: {example}")
 
 
-@router.message(CreateEvent.date)
+@router.message(CreateEvent.date, F.text)
 async def process_event_date(message: Message, state: FSMContext):
     try:
-        event_date = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
-        await state.update_data(date=event_date)
-        await state.set_state(CreateEvent.location)
-        await message.answer("📍 Введите место проведения:")
+        event_date = datetime.strptime(message.text.strip(), "%d.%m.%Y %H:%M")
     except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ")
+        await message.answer("❌ Неверный формат. Нужно: ДД.ММ.ГГГГ ЧЧ:ММ")
+        return
+
+    if event_date <= datetime.now():
+        await message.answer("❌ Эта дата уже прошла. Введите дату в будущем:")
+        return
+
+    await state.update_data(date=event_date)
+    await state.set_state(CreateEvent.post_url)
+    await message.answer("🔗 Ссылка на пост (или канал) LEMON в Telegram:")
 
 
-@router.message(CreateEvent.location)
-async def process_event_location(message: Message, state: FSMContext):
-    await state.update_data(location=message.text)
-    await state.set_state(CreateEvent.price)
-    await message.answer("💰 Введите цену билета (только число):")
+@router.message(CreateEvent.post_url, F.text)
+async def process_event_post_url(message: Message, state: FSMContext):
+    url = normalize_tg_link(message.text)
+    if not url:
+        await message.answer("❌ Нужна ссылка на Telegram (например, https://t.me/lemon/123) или @канал")
+        return
+
+    await state.update_data(post_url=url)
+    await state.set_state(CreateEvent.price_list)
+    await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
 
 
-@router.message(CreateEvent.price)
-async def process_event_price(message: Message, state: FSMContext):
-    try:
-        price = int(message.text)
-        await state.update_data(price=price)
-        await state.set_state(CreateEvent.total_tickets)
-        await message.answer("🎫 Введите общее количество билетов:")
-    except ValueError:
-        await message.answer("❌ Введите число")
+@router.message(CreateEvent.price_list, F.text)
+async def process_event_price_list(message: Message, state: FSMContext):
+    price = parse_price(message.text)
+    if price is None:
+        await message.answer("❌ Введите целое число (0 или больше)")
+        return
+
+    await state.update_data(price_list=price)
+    await state.set_state(CreateEvent.price_nolist)
+    await message.answer("🚪 Цена «Без списка» (₽):")
 
 
-@router.message(CreateEvent.total_tickets)
+@router.message(CreateEvent.price_nolist, F.text)
+async def process_event_price_nolist(message: Message, state: FSMContext):
+    price = parse_price(message.text)
+    if price is None:
+        await message.answer("❌ Введите целое число (0 или больше)")
+        return
+
+    await state.update_data(price_nolist=price)
+    await state.set_state(CreateEvent.total_tickets)
+    await message.answer("🎫 Сколько всего билетов?")
+
+
+@router.message(CreateEvent.total_tickets, F.text)
 async def process_event_tickets(message: Message, state: FSMContext):
-    try:
-        total_tickets = int(message.text)
-        data = await state.get_data()
+    total_tickets = parse_price(message.text)
+    if not total_tickets:
+        await message.answer("❌ Введите целое число больше 0")
+        return
 
-        event_id = await db.create_event(
-            name=data['name'],
-            description=data['description'],
-            date=data['date'],
-            location=data['location'],
-            price=data['price'],
-            total_tickets=total_tickets,
-            created_by=message.from_user.id
-        )
+    data = await state.get_data()
 
-        await state.clear()
-        await message.answer(f"✅ Мероприятие создано! ID: {event_id}")
-    except ValueError:
-        await message.answer("❌ Введите число")
+    event_id = await db.create_event(
+        name=data['name'],
+        date=data['date'],
+        post_url=data['post_url'],
+        price_list=data['price_list'],
+        price_nolist=data['price_nolist'],
+        total_tickets=total_tickets,
+        created_by=message.from_user.id
+    )
 
+    await state.clear()
+    await message.answer(
+        f"✅ Мероприятие создано! ID: {event_id}\n\n"
+        f"🎉 {data['name']}\n"
+        f"📅 {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
+        f"📋 По списку — {data['price_list']}₽\n"
+        f"🚪 Без списка — {data['price_nolist']}₽\n"
+        f"🎫 Билетов: {total_tickets}"
+    )
+
+
+# ---------- Подарочные билеты ----------
 
 @router.message(F.text == "🎁 Выдать билет")
 async def start_gift_ticket(message: Message, state: FSMContext):
@@ -133,44 +208,52 @@ async def start_gift_ticket(message: Message, state: FSMContext):
     await message.answer(text)
 
 
-@router.message(GiftTicket.event_id)
+@router.message(GiftTicket.event_id, F.text)
 async def process_gift_event_id(message: Message, state: FSMContext):
     try:
-        event_id = int(message.text)
-        event = await db.get_event(event_id)
-
-        if not event:
-            await message.answer("❌ Мероприятие не найдено")
-            return
-
-        if event['available_tickets'] <= 0:
-            await message.answer("❌ Билеты закончились")
-            return
-
-        await state.update_data(event_id=event_id)
-        await state.set_state(GiftTicket.waiting_for_user)
-        await message.answer("👤 Отправьте ID пользователя или перешлите его сообщение:")
+        event_id = int(message.text.strip())
     except ValueError:
         await message.answer("❌ Введите число")
+        return
+
+    event = await db.get_event(event_id)
+
+    if not event:
+        await message.answer("❌ Мероприятие не найдено")
+        return
+
+    if event['available_tickets'] <= 0:
+        await message.answer("❌ Билеты закончились")
+        return
+
+    await state.update_data(event_id=event_id)
+    await state.set_state(GiftTicket.waiting_for_user)
+    await message.answer("👤 Отправьте ID пользователя или перешлите его сообщение:")
 
 
 @router.message(GiftTicket.waiting_for_user)
 async def process_gift_user(message: Message, state: FSMContext):
+    target = extract_target_user(message)
+    if target is None:
+        await message.answer(TARGET_USER_ERROR)
+        return
+
+    user_id, username = target
+    username = username or "Unknown"
+
+    data = await state.get_data()
+    event_id = data['event_id']
+    event = await db.get_event(event_id)
+
+    if not event:
+        await message.answer("❌ Мероприятие не найдено")
+        await state.clear()
+        return
+
+    qr_code = generate_unique_ticket_code()
+
     try:
-        if message.forward_from:
-            user_id = message.forward_from.id
-            username = message.forward_from.username or "Unknown"
-        else:
-            user_id = int(message.text)
-            username = "Unknown"
-
-        data = await state.get_data()
-        event_id = data['event_id']
-        event = await db.get_event(event_id)
-
-        qr_code = generate_unique_ticket_code()
-
-        ticket_id = await db.create_ticket(
+        await db.create_ticket(
             event_id=event_id,
             user_id=user_id,
             username=username,
@@ -178,45 +261,52 @@ async def process_gift_user(message: Message, state: FSMContext):
             ticket_type='gifted',
             gifted_by=message.from_user.id
         )
-
-        qr_image = generate_qr_code(qr_code)
-        date_str = event['date'].strftime("%d.%m.%Y %H:%M")
-
-        text = f"""
-✅ Подарочный билет выдан!
-
-🎉 {event['name']}
-📅 {date_str}
-📍 {event['location']}
-
-👤 Получатель: {user_id}
-🎫 Код: `{qr_code}`
-        """
-
-        photo = BufferedInputFile(qr_image.read(), filename="ticket_qr.png")
-        await message.answer_photo(photo=photo, caption=text, parse_mode="Markdown")
-
-        try:
-            await message.bot.send_photo(
-                chat_id=user_id,
-                photo=BufferedInputFile(generate_qr_code(qr_code).read(), filename="ticket_qr.png"),
-                caption=f"🎁 Вам подарили билет!\n\n{text}"
-            )
-        except:
-            await message.answer("⚠️ Не удалось отправить билет пользователю напрямую")
-
+    except SoldOutError:
+        await message.answer("❌ Билеты закончились")
         await state.clear()
+        return
+    except Exception:
+        logger.exception("Gift ticket error")
+        await message.answer("❌ Не удалось выдать билет. Подробности в логах.")
+        await state.clear()
+        return
 
-    except ValueError:
-        await message.answer("❌ Неверный формат ID")
+    date_str = event['date'].strftime("%d.%m.%Y %H:%M")
+
+    text = (
+        "✅ Подарочный билет выдан!\n\n"
+        f"🎉 {html.escape(event['name'])}\n"
+        f"📅 {date_str}\n\n"
+        f"👤 Получатель: {user_id}\n"
+        f"🎫 Код: <code>{qr_code}</code>"
+    )
+
+    qr_bytes = (await make_ticket_qr(message.bot, qr_code)).read()
+    await message.answer_photo(
+        photo=BufferedInputFile(qr_bytes, filename="ticket_qr.png"),
+        caption=text, parse_mode="HTML"
+    )
+
+    try:
+        await message.bot.send_photo(
+            chat_id=user_id,
+            photo=BufferedInputFile(qr_bytes, filename="ticket_qr.png"),
+            caption=f"🎁 Вам подарили билет!\n\n{text}",
+            parse_mode="HTML"
+        )
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-        await state.clear()
+        logger.warning("Не удалось отправить подарочный билет пользователю %s: %s", user_id, e)
+        await message.answer(
+            "⚠️ Не удалось отправить билет пользователю напрямую "
+            "(возможно, он ещё не запускал бота). Билет есть в его разделе «Мои билеты»."
+        )
+
+    await state.clear()
 
 
-@router.callback_query(F.data.startswith("gift_"))
+@router.callback_query(F.data.regexp(r"^gift_\d+$"))
 async def gift_from_event(callback: CallbackQuery, state: FSMContext):
-    if not await db.is_admin(callback.from_user.id):
+    if not await is_admin_id(callback.from_user.id):
         await callback.answer("❌ У вас нет прав администратора", show_alert=True)
         return
 
@@ -233,69 +323,7 @@ async def gift_from_event(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.message(F.text == "✅ Проверить билет")
-async def start_check_ticket(message: Message, state: FSMContext):
-    if not await is_admin_filter(message):
-        await message.answer("❌ У вас нет прав администратора")
-        return
-
-    await state.set_state(CheckTicket.waiting_for_code)
-    await message.answer("📷 Отправьте код билета:")
-
-
-@router.message(CheckTicket.waiting_for_code)
-async def process_check_ticket(message: Message, state: FSMContext):
-    qr_code = message.text.strip()
-
-    ticket = await db.validate_and_use_ticket(qr_code, message.from_user.id)
-
-    if not ticket:
-        await message.answer("❌ Билет не найден")
-        await state.clear()
-        return
-
-    date_str = ticket['event_date'].strftime("%d.%m.%Y %H:%M")
-    ticket_type = "🎁 Подарочный" if ticket['ticket_type'] == 'gifted' else "💳 Куплен"
-
-    if ticket['just_used']:
-        text = f"""
-✅ БИЛЕТ АКТИВИРОВАН!
-
-🎉 {ticket['event_name']}
-📅 {date_str}
-👤 Владелец: @{ticket['username'] or 'Unknown'}
-🎫 Тип: {ticket_type}
-
-Пользователь может пройти!
-        """
-    else:
-        if ticket['used_at']:
-            used_str = ticket['used_at'].strftime("%d.%m.%Y %H:%M")
-            text = f"""
-❌ БИЛЕТ УЖЕ ИСПОЛЬЗОВАН!
-
-🎉 {ticket['event_name']}
-📅 {date_str}
-👤 Владелец: @{ticket['username'] or 'Unknown'}
-🎫 Тип: {ticket_type}
-
-⚠️ Использован: {used_str}
-            """
-        else:
-            text = f"""
-⚠️ БИЛЕТ НЕ АКТИВЕН
-
-🎉 {ticket['event_name']}
-📅 {date_str}
-👤 Владелец: @{ticket['username'] or 'Unknown'}
-🎫 Тип: {ticket_type}
-
-Статус: {ticket['status']}
-            """
-
-    await message.answer(text)
-    await state.clear()
-
+# ---------- Статистика ----------
 
 @router.message(F.text == "📊 Статистика")
 async def show_statistics_menu(message: Message):
@@ -314,6 +342,10 @@ async def show_statistics_menu(message: Message):
 
 @router.callback_query(F.data == "stats_all")
 async def show_all_statistics(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора", show_alert=True)
+        return
+
     stats = await db.get_all_statistics()
 
     if not stats:
@@ -322,37 +354,40 @@ async def show_all_statistics(callback: CallbackQuery):
 
     text = "📊 ОБЩАЯ СТАТИСТИКА\n\n"
 
-    total_revenue = 0
-    total_purchased = 0
-    total_gifted = 0
-    total_used = 0
+    totals = dict(revenue=0, purchased=0, list=0, nolist=0, gifted=0, used=0)
 
     for stat in stats:
         text += f"🎉 {stat['name']}\n"
-        text += f"💳 Куплено: {stat['purchased_count']}\n"
+        text += f"📋 По списку: {stat['list_count']} · 🚪 Без списка: {stat['nolist_count']}\n"
         text += f"🎁 Подарено: {stat['gifted_count']}\n"
         text += f"✅ Использовано: {stat['used_count']}/{stat['total_sold']}\n"
-        text += f"💰 Выручка: {stat['revenue'] or 0}₽\n"
+        text += f"💰 Выручка: {stat['revenue']}₽\n"
         text += f"🎫 Осталось: {stat['available_tickets']}/{stat['total_tickets']}\n\n"
 
-        total_revenue += stat['revenue'] or 0
-        total_purchased += stat['purchased_count']
-        total_gifted += stat['gifted_count']
-        total_used += stat['used_count']
+        totals['revenue'] += stat['revenue']
+        totals['purchased'] += stat['purchased_count']
+        totals['list'] += stat['list_count']
+        totals['nolist'] += stat['nolist_count']
+        totals['gifted'] += stat['gifted_count']
+        totals['used'] += stat['used_count']
 
-    text += f"━━━━━━━━━━━━━━━━\n"
-    text += f"ИТОГО:\n"
-    text += f"💳 Куплено билетов: {total_purchased}\n"
-    text += f"🎁 Подарено билетов: {total_gifted}\n"
-    text += f"✅ Использовано: {total_used}\n"
-    text += f"💰 Общая выручка: {total_revenue}₽"
+    text += "━━━━━━━━━━━━━━━━\n"
+    text += "ИТОГО:\n"
+    text += f"💳 Куплено билетов: {totals['purchased']} (📋 {totals['list']} · 🚪 {totals['nolist']})\n"
+    text += f"🎁 Подарено билетов: {totals['gifted']}\n"
+    text += f"✅ Использовано: {totals['used']}\n"
+    text += f"💰 Общая выручка: {totals['revenue']}₽"
 
     await callback.message.edit_text(text, reply_markup=stats_menu_keyboard(stats))
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("stats_"))
+@router.callback_query(F.data.regexp(r"^stats_\d+$"))
 async def show_event_statistics(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора", show_alert=True)
+        return
+
     event_id = int(callback.data.split("_")[1])
     event = await db.get_event(event_id)
     stats = await db.get_event_statistics(event_id)
@@ -368,18 +403,17 @@ async def show_event_statistics(callback: CallbackQuery):
 
 🎉 {event['name']}
 📅 {date_str}
-📍 {event['location']}
-💰 Цена: {event['price']}₽
 
 ━━━━━━━━━━━━━━━━
-💳 Куплено билетов: {stats['purchased_count']}
-🎁 Подарено билетов: {stats['gifted_count']}
-📦 Всего продано: {stats['total_sold']}
+📋 По списку: {stats['list_count']}
+🚪 Без списка: {stats['nolist_count']}
+🎁 Подарено: {stats['gifted_count']}
+📦 Всего выдано: {stats['total_sold']}
 ✅ Использовано: {stats['used_count']}
 🎫 Осталось: {event['available_tickets']}/{event['total_tickets']}
 
 ━━━━━━━━━━━━━━━━
-💰 Выручка: {stats['revenue'] or 0}₽
+💰 Выручка: {stats['revenue']}₽
     """
 
     events = await db.get_active_events()
@@ -389,9 +423,15 @@ async def show_event_statistics(callback: CallbackQuery):
 
 @router.callback_query(F.data == "close_stats")
 async def close_statistics(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ У вас нет прав администратора", show_alert=True)
+        return
+
     await callback.message.delete()
     await callback.answer()
 
+
+# ---------- Добавление админов ----------
 
 @router.message(F.text == "👥 Добавить админа")
 async def start_add_admin(message: Message, state: FSMContext):
@@ -405,16 +445,16 @@ async def start_add_admin(message: Message, state: FSMContext):
 
 @router.message(AddAdmin.waiting_for_id)
 async def process_add_admin(message: Message, state: FSMContext):
-    try:
-        if message.forward_from:
-            user_id = message.forward_from.id
-            username = message.forward_from.username
-        else:
-            user_id = int(message.text)
-            username = None
-
-        await db.add_admin(user_id, username)
+    if message.from_user.id not in config.ADMIN_IDS:
         await state.clear()
-        await message.answer(f"✅ Пользователь {user_id} добавлен в список администраторов")
-    except ValueError:
-        await message.answer("❌ Неверный формат ID")
+        return
+
+    target = extract_target_user(message)
+    if target is None:
+        await message.answer(TARGET_USER_ERROR)
+        return
+
+    user_id, username = target
+    await db.add_admin(user_id, username)
+    await state.clear()
+    await message.answer(f"✅ Пользователь {user_id} добавлен в список администраторов")

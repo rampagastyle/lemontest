@@ -1,6 +1,7 @@
 from .user import (
     main_menu,
     admin_menu,
+    scan_menu,
     events_list_keyboard,
     event_detail_keyboard,
     confirm_purchase_keyboard,
@@ -11,6 +12,7 @@ from .user import (
 __all__ = [
     'main_menu',
     'admin_menu',
+    'scan_menu',
     'events_list_keyboard',
     'event_detail_keyboard',
     'confirm_purchase_keyboard',

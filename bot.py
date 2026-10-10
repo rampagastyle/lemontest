@@ -5,17 +5,24 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
 from database import db
-from handlers import user_handlers, admin_handlers
+from handlers import scan_handlers, user_handlers, admin_handlers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 async def main():
+    if not config.BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан. Укажите его в .env или в переменных окружения.")
+    if not config.DATABASE_URL:
+        raise RuntimeError("DATABASE_URL не задан. Укажите его в .env или в переменных окружения.")
+
     bot = Bot(token=config.BOT_TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
+    # scan_handlers первым: /start t_<код> должен обрабатываться раньше обычного /start
+    dp.include_router(scan_handlers.router)
     dp.include_router(user_handlers.router)
     dp.include_router(admin_handlers.router)
 
