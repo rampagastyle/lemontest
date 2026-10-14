@@ -156,13 +156,14 @@ async def process_event_vk_url(message: Message, state: FSMContext):
         return
 
     # Валидация VK-ссылки
-    if not await vk_client.validate_post_url(vk_url):
+    is_valid = await vk_client.validate_post_url(vk_url)
+    if not is_valid:
         await message.answer("❌ Не удалось валидировать VK-пост. Проверьте ссылку или пропустите (/skip)")
         return
 
     await state.update_data(vk_post_url=vk_url)
     await state.set_state(CreateEvent.price_list)
-    await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
+    await message.answer("✅ VK-пост валидирован!\n\n📋 Цена «По списку» (₽, 0 — бесплатно):")
 
     price = parse_price(message.text)
     if price is None:
