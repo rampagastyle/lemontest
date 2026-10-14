@@ -237,13 +237,10 @@ async def process_screenshot(message: Message, state: FSMContext):
         await state.clear()
 
 
-@router.message(ListCheck)
-async def cancel_list_check(message: Message, state: FSMContext):
-    """Отменяет проверку списка."""
+@router.message(F.state.in_([ListCheck.waiting_for_screenshot]))
+async def screenshot_non_photo(message: Message):
+    """Обработка не-фотографий при ожидании скриншота."""
     if message.text == "/cancel":
-        await state.clear()
-        is_admin = await db.is_admin(message.from_user.id)
-        keyboard = admin_menu() if is_admin else main_menu()
-        await message.answer("❌ Проверка отменена", reply_markup=keyboard)
+        await message.reply("❌ Проверка отменена")
     else:
         await message.answer("❌ Отправьте изображение или /cancel")
