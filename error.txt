@@ -1,5 +1,7 @@
-INFO:utils.vk_api: Запрос к VK API: owner_id=-242304685, post_id=1
-ИНФОРМАЦИЯ:utils.vk_api: ответ API VK: {"response":[{"inner_type":"wall_wallpost","donut":{"is_donut":false},"comments":{"count":0},"marked_as_ads":0,"zoom_text":true,"hash":"izIe-ktVwC52Gh6XZQ","type":"post","push_subscription":{"is_subsc
-INFO:utils.vk_api: Найдено сообщений в VK: 1
-INFO:aiogram.event:Обновление id=215307553 обработано. Длительность 894 мс, бот id=8911203415
-INFO:aiogram.event:Обновление id=215307554 не обработано. Длительность 14 мс, бот id=8911203415
+INFO:__main__:🍋 LEMON Tickets TEST bot started!
+INFO:aiogram.event:Update id=215307556 is handled. Duration 230 ms by bot id=8911203415
+INFO:aiogram.event:Update id=215307557 is handled. Duration 182 ms by bot id=8911203415
+INFO:aiogram.event:Update id=215307558 is handled. Duration 174 ms by bot id=8911203415
+INFO:aiogram.event:Update id=215307559 is handled. Duration 194 ms by bot id=8911203415
+INFO:aiogram.event:Update id=215307560 is handled. Duration 348 ms by bot id=8911203415
+INFO:aiogram.event:Update id=215307561 is not handled. Duration 8 ms by bot id=8911203415

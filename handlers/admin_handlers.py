@@ -158,6 +158,9 @@ async def process_event_vk_url(message: Message, state: FSMContext):
     await state.set_state(CreateEvent.price_list)
     await message.answer(f"✅ VK-пост сохранена!\n\n📋 Цена «По списку» (₽, 0 — бесплатно):")
 
+
+@router.message(CreateEvent.price_list, F.text)
+async def process_event_price_list(message: Message, state: FSMContext):
     price = parse_price(message.text)
     if price is None:
         await message.answer("❌ Введите целое число (0 или больше)")
