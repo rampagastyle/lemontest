@@ -14,11 +14,7 @@ class VKAPIClient:
         self.version = config.VK_API_VERSION
 
     async def get_post_info(self, post_url: str) -> Optional[Dict]:
-        """Получает информацию о посте по ссылке VK.
-
-        Ожидает ссылку типа: https://vk.com/wall-123456_789 или https://vk.com/club123
-        Возвращает: {owner_id, post_id, text, created_at} или None
-        """
+        """Получает информацию о посте по ссылке VK."""
         owner_id, post_id = self._parse_post_url(post_url)
         if not owner_id or not post_id:
             logger.warning(f"Не удалось распарсить URL: {post_url}")
@@ -36,6 +32,8 @@ class VKAPIClient:
                     'access_token': self.token,
                     'v': self.version,
                 }
+                logger.info(f"VK API request: owner_id={owner_id}, post_id={post_id}")
+
                 async with session.get(
                     f"{self.base_url}/wall.getById",
                     params=params,
@@ -44,15 +42,20 @@ class VKAPIClient:
                     if resp.status != 200:
                         logger.warning(f"VK API returned {resp.status}")
                         return None
+
+                    text = await resp.text()
+                    logger.info(f"VK API response: {text[:200]}")
+
                     data = await resp.json()
 
-                    # Проверяем ошибку API
                     if 'error' in data:
-                        logger.error(f"VK API error: {data['error']}")
+                        err = data.get('error', {})
+                        logger.error(f"VK API error {err.get('error_code')}: {err.get('error_msg')}")
                         return None
 
                     if 'response' in data and data['response']:
                         post = data['response'][0]
+                        logger.info(f"VK post found: {post.get('id')}")
                         return {
                             'owner_id': post.get('owner_id'),
                             'post_id': post.get('id'),
@@ -61,10 +64,10 @@ class VKAPIClient:
                             'from_id': post.get('from_id')
                         }
 
-                    logger.warning(f"VK API no posts found: {data}")
+                    logger.warning(f"VK API empty response")
                     return None
         except Exception as e:
-            logger.error(f"VK API error: {e}")
+            logger.error(f"VK API exception: {type(e).__name__}: {e}")
             return None
 
     async def validate_post_url(self, post_url: str) -> bool:
