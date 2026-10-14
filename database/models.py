@@ -84,6 +84,57 @@ class Database:
                 )
             ''')
 
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_vk_links (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
+                    vk_username TEXT NOT NULL,
+                    vk_profile_url TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS events_vk (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER UNIQUE REFERENCES events(id) ON DELETE CASCADE,
+                    vk_post_url TEXT NOT NULL,
+                    vk_post_id TEXT,
+                    vk_owner_id TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS list_checks (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    vk_username TEXT,
+                    status TEXT DEFAULT 'pending',
+                    screenshot_hash TEXT,
+                    gemini_analysis JSONB,
+                    author_match BOOLEAN,
+                    has_community_tag BOOLEAN,
+                    has_event_poster BOOLEAN,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    checked_at TIMESTAMP,
+                    checked_by_admin BIGINT
+                )
+            ''')
+
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS screenshot_hashes (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    hash TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(event_id, user_id, hash)
+                )
+            ''')
+
             # ---- Миграции для баз, созданных старой версией бота (безопасно запускать повторно) ----
             await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS post_url TEXT')
             await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS price_list INTEGER')
@@ -396,6 +447,126 @@ class Database:
                 RETURNING id
             ''', user_id, username, message)
             return request_id
+
+    # ---------- VK-интеграция ----------
+
+    async def link_vk_account(self, user_id: int, vk_username: str, vk_profile_url: str = None) -> bool:
+        """Привязывает VK-аккаунт к пользователю Telegram."""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO user_vk_links (user_id, vk_username, vk_profile_url, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET vk_username = $2, vk_profile_url = $3, updated_at = NOW()
+            ''', user_id, vk_username, vk_profile_url)
+            return True
+
+    async def get_vk_username(self, user_id: int) -> Optional[str]:
+        """Получает привязанный VK-username пользователя."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                'SELECT vk_username FROM user_vk_links WHERE user_id = $1',
+                user_id
+            )
+
+    async def link_vk_post_to_event(self, event_id: int, vk_post_url: str, vk_post_id: str = None, vk_owner_id: str = None) -> bool:
+        """Привязывает VK-пост к мероприятию."""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO events_vk (event_id, vk_post_url, vk_post_id, vk_owner_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (event_id) DO UPDATE
+                SET vk_post_url = $2, vk_post_id = $3, vk_owner_id = $4
+            ''', event_id, vk_post_url, vk_post_id, vk_owner_id)
+            return True
+
+    async def get_event_vk_post(self, event_id: int) -> Optional[dict]:
+        """Получает VK-пост события."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT * FROM events_vk WHERE event_id = $1',
+                event_id
+            )
+            return dict(row) if row else None
+
+    async def create_list_check(self, event_id: int, user_id: int, vk_username: str,
+                               screenshot_hash: str, gemini_analysis: dict = None,
+                               author_match: bool = False, has_community_tag: bool = False,
+                               has_event_poster: bool = False) -> int:
+        """Создаёт запись проверки списка."""
+        import json
+        async with self.pool.acquire() as conn:
+            check_id = await conn.fetchval('''
+                INSERT INTO list_checks
+                (event_id, user_id, vk_username, screenshot_hash, gemini_analysis,
+                 author_match, has_community_tag, has_event_poster, status, checked_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+                RETURNING id
+            ''', event_id, user_id, vk_username, screenshot_hash,
+            json.dumps(gemini_analysis) if gemini_analysis else None,
+            author_match, has_community_tag, has_event_poster)
+            return check_id
+
+    async def approve_list_check(self, check_id: int, admin_id: int) -> bool:
+        """Одобряет проверку списка администратором."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute('''
+                UPDATE list_checks
+                SET status = 'approved', checked_by_admin = $2, checked_at = NOW()
+                WHERE id = $1
+            ''', check_id, admin_id)
+            return result.endswith('1')
+
+    async def reject_list_check(self, check_id: int, admin_id: int) -> bool:
+        """Отклоняет проверку списка."""
+        async with self.pool.acquire() as conn:
+            result = await conn.execute('''
+                UPDATE list_checks
+                SET status = 'rejected', checked_by_admin = $2, checked_at = NOW()
+                WHERE id = $1
+            ''', check_id, admin_id)
+            return result.endswith('1')
+
+    async def check_screenshot_duplicate(self, event_id: int, user_id: int, screenshot_hash: str) -> bool:
+        """Проверяет, не отправлял ли пользователь этот скриншот уже."""
+        async with self.pool.acquire() as conn:
+            exists = await conn.fetchval('''
+                SELECT EXISTS(
+                    SELECT 1 FROM screenshot_hashes
+                    WHERE event_id = $1 AND user_id = $2 AND hash = $3
+                )
+            ''', event_id, user_id, screenshot_hash)
+            return exists
+
+    async def add_screenshot_hash(self, event_id: int, user_id: int, screenshot_hash: str) -> bool:
+        """Добавляет хеш скриншота в дедупликацию."""
+        async with self.pool.acquire() as conn:
+            try:
+                await conn.execute('''
+                    INSERT INTO screenshot_hashes (event_id, user_id, hash)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (event_id, user_id, hash) DO NOTHING
+                ''', event_id, user_id, screenshot_hash)
+                return True
+            except Exception:
+                return False
+
+    async def get_user_list_checks(self, user_id: int, event_id: int = None) -> List[dict]:
+        """Получает все проверки списков пользователя."""
+        async with self.pool.acquire() as conn:
+            if event_id:
+                rows = await conn.fetch('''
+                    SELECT * FROM list_checks
+                    WHERE user_id = $1 AND event_id = $2
+                    ORDER BY created_at DESC
+                ''', user_id, event_id)
+            else:
+                rows = await conn.fetch('''
+                    SELECT * FROM list_checks
+                    WHERE user_id = $1
+                    ORDER BY created_at DESC
+                ''', user_id)
+            return [dict(row) for row in rows]
 
 
 db = Database()

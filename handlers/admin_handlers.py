@@ -22,6 +22,7 @@ class CreateEvent(StatesGroup):
     name = State()
     date = State()
     post_url = State()
+    vk_post_url = State()
     price_list = State()
     price_nolist = State()
     total_tickets = State()
@@ -137,12 +138,32 @@ async def process_event_post_url(message: Message, state: FSMContext):
         return
 
     await state.update_data(post_url=url)
+    await state.set_state(CreateEvent.vk_post_url)
+    await message.answer("🔗 Ссылка на пост в сообществе VK (для проверки списков):\nНапример: https://vk.com/wall-123456_789 или пропустить (/skip)")
+
+
+@router.message(CreateEvent.vk_post_url, F.text)
+async def process_event_vk_url(message: Message, state: FSMContext):
+    from utils.vk_api import vk_client
+
+    vk_url = message.text.strip()
+
+    # Пропуск
+    if vk_url.lower() in ['/skip', 'skip']:
+        await state.update_data(vk_post_url=None)
+        await state.set_state(CreateEvent.price_list)
+        await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
+        return
+
+    # Валидация VK-ссылки
+    if not await vk_client.validate_post_url(vk_url):
+        await message.answer("❌ Не удалось валидировать VK-пост. Проверьте ссылку или пропустите (/skip)")
+        return
+
+    await state.update_data(vk_post_url=vk_url)
     await state.set_state(CreateEvent.price_list)
     await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
 
-
-@router.message(CreateEvent.price_list, F.text)
-async def process_event_price_list(message: Message, state: FSMContext):
     price = parse_price(message.text)
     if price is None:
         await message.answer("❌ Введите целое число (0 или больше)")
@@ -184,14 +205,20 @@ async def process_event_tickets(message: Message, state: FSMContext):
         created_by=message.from_user.id
     )
 
+    # Привязываем VK-пост если был указан
+    vk_post_url = data.get('vk_post_url')
+    if vk_post_url:
+        await db.link_vk_post_to_event(event_id, vk_post_url)
+
     await state.clear()
+    vk_info = f"\n🔗 VK-пост привязан" if vk_post_url else ""
     await message.answer(
         f"✅ Мероприятие создано! ID: {event_id}\n\n"
         f"🎉 {data['name']}\n"
         f"📅 {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
         f"📋 По списку — {data['price_list']}₽\n"
         f"🚪 Без списка — {data['price_nolist']}₽\n"
-        f"🎫 Билетов: {total_tickets}"
+        f"🎫 Билетов: {total_tickets}{vk_info}"
     )
 
 
