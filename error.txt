@@ -1,9 +1,5 @@
 INFO:utils.vk_api: Запрос к VK API: owner_id=-242304685, post_id=1
 ИНФОРМАЦИЯ:utils.vk_api: ответ API VK: {"response":[{"inner_type":"wall_wallpost","donut":{"is_donut":false},"comments":{"count":0},"marked_as_ads":0,"zoom_text":true,"hash":"izIe-ktVwC52Gh6XZQ","type":"post","push_subscription":{"is_subsc
 INFO:utils.vk_api: Найдено сообщений в VK: 1
-
-после чего поступило 
-INFO:aiogram.event:Обновление id=215307545 обработано. Длительность 897 мс, бот id=8911203415
-INFO:aiogram.event:Обновление id=215307546 не обработано. Длительность 3 мс, бот id=8911203415
-
-то есть ниче не продолжилось
+INFO:aiogram.event:Обновление id=215307553 обработано. Длительность 894 мс, бот id=8911203415
+INFO:aiogram.event:Обновление id=215307554 не обработано. Длительность 14 мс, бот id=8911203415

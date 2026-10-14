@@ -144,8 +144,6 @@ async def process_event_post_url(message: Message, state: FSMContext):
 
 @router.message(CreateEvent.vk_post_url, F.text)
 async def process_event_vk_url(message: Message, state: FSMContext):
-    from utils.vk_api import vk_client
-
     vk_url = message.text.strip()
 
     # Пропуск
@@ -155,15 +153,10 @@ async def process_event_vk_url(message: Message, state: FSMContext):
         await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
         return
 
-    # Валидация VK-ссылки
-    is_valid = await vk_client.validate_post_url(vk_url)
-    if not is_valid:
-        await message.answer("❌ Не удалось валидировать VK-пост. Проверьте ссылку или пропустите (/skip)")
-        return
-
+    # VK-ссылку сохраняем как есть, без валидации (упростим)
     await state.update_data(vk_post_url=vk_url)
     await state.set_state(CreateEvent.price_list)
-    await message.answer("✅ VK-пост валидирован!\n\n📋 Цена «По списку» (₽, 0 — бесплатно):")
+    await message.answer(f"✅ VK-пост сохранена!\n\n📋 Цена «По списку» (₽, 0 — бесплатно):")
 
     price = parse_price(message.text)
     if price is None:
