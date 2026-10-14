@@ -1,0 +1,61 @@
+Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/middlewares/user_context.py, строка 56, в __call__
+ вернитесь к ожиданию обработчика (event, data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+INFO:__main__:🍋 Запущен тестовый бот LEMON Tickets!
+INFO:aiogram.dispatcher:Начать опрос
+INFO:aiogram.dispatcher:Запустить опрос для бота @lemontesttestbot_bot id=8911203415 - 'LEMON TEST'
+INFO:aiogram.event:Обновление id=215307484 не обработано. Длительность 2 мс, бот id=8911203415
+ОШИБКА:aiogram.event:возникло исключение при обновлении процесса id=215307484 ботом id=8911203415
+TypeError: ListCheck() не принимает аргументов
+Traceback (последний вызов):
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/dispatcher.py, строка 309, в _process_update
+ response = await self.feed_update(bot, update, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/dispatcher.py, строка 158, в feed_update
+ response = await self.update.wrap_outer_middleware(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/middlewares/error.py, строка 25, в __call__
+ вернитесь к ожиданию обработчика (event, data)
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/fsm/middleware.py, строка 42, в __call__
+ вернитесь к ожиданию обработчика (event, data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/event/telegram.py, строка 121, в триггере
+ вернитесь к ожиданию wrapped_inner(event, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/event/handler.py, строка 43, в вызове
+ return await завернутый()
+           ^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/dispatcher.py, строка 276, в _listen_update
+ return await self.propagate_event(update_type=update_type, event=event, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 146, в функции propagate_event
+ return await observer.wrap_outer_middleware(_wrapped, event=event, data=kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 141, в _wrapped
+ вернитесь и дождитесь, пока self._propagate_event(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ проверка = ожидание вызова event_filter.call(*args, **kwargs)
+ response = await router.propagate_event(update_type=update_type, event=event, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 146, в функции propagate_event
+ return await observer.wrap_outer_middleware(_wrapped, event=event, data=kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 141, в _wrapped
+ вернитесь и дождитесь, пока self._propagate_event(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 166, в _propagate_event
+ response = await observer.trigger(event, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/event/telegram.py, строка 113, в триггере
+ результат, данные = await handler.check(event, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/router.py, строка 174, в _propagate_event
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/event/handler.py, строка 94, в проверке
+ результат = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: ListCheck() не принимает аргументов
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /opt/venv/lib/python3.12/site-packages/aiogram/dispatcher/event/handler.py, строка 48, в вызове
+ return await loop.run_in_executor(None, wrapped)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ Файл /root/.nix-profile/lib/python3.12/concurrent/futures/thread.py, строка 58, в функции run

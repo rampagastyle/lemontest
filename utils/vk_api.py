@@ -21,16 +21,20 @@ class VKAPIClient:
         """
         owner_id, post_id = self._parse_post_url(post_url)
         if not owner_id or not post_id:
+            logger.warning(f"Не удалось распарсить URL: {post_url}")
+            return None
+
+        if not self.token:
+            logger.error("VK_API_TOKEN не установлен")
             return None
 
         try:
             async with aiohttp.ClientSession() as session:
                 params = {
                     'owner_id': owner_id,
-                    'posts': f"{owner_id}_{post_id}",
+                    'post_ids': f"{owner_id}_{post_id}",
                     'access_token': self.token,
                     'v': self.version,
-                    'fields': 'created_by,text'
                 }
                 async with session.get(
                     f"{self.base_url}/wall.getById",
@@ -41,6 +45,12 @@ class VKAPIClient:
                         logger.warning(f"VK API returned {resp.status}")
                         return None
                     data = await resp.json()
+
+                    # Проверяем ошибку API
+                    if 'error' in data:
+                        logger.error(f"VK API error: {data['error']}")
+                        return None
+
                     if 'response' in data and data['response']:
                         post = data['response'][0]
                         return {
@@ -50,12 +60,18 @@ class VKAPIClient:
                             'created_at': post.get('date'),
                             'from_id': post.get('from_id')
                         }
+
+                    logger.warning(f"VK API no posts found: {data}")
+                    return None
         except Exception as e:
             logger.error(f"VK API error: {e}")
             return None
 
     async def validate_post_url(self, post_url: str) -> bool:
         """Проверяет, что ссылка валидна и пост существует."""
+        if not self.token:
+            logger.error("VK_API_TOKEN не установлен")
+            return False
         info = await self.get_post_info(post_url)
         return info is not None
 
