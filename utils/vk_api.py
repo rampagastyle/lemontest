@@ -32,7 +32,7 @@ class VKAPIClient:
             async with aiohttp.ClientSession() as session:
                 params = {
                     'owner_id': owner_id,
-                    'post_ids': f"{owner_id}_{post_id}",
+                    'posts': f"{owner_id}_{post_id}",
                     'access_token': self.token,
                     'v': self.version,
                 }
