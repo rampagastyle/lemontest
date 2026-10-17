@@ -9,6 +9,7 @@ from .user import (
     ticket_keyboard,
     manage_events_keyboard,
     manage_event_actions_keyboard,
+    confirm_delete_event_keyboard,
     stats_menu_keyboard
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     'ticket_keyboard',
     'manage_events_keyboard',
     'manage_event_actions_keyboard',
+    'confirm_delete_event_keyboard',
     'stats_menu_keyboard'
 ]

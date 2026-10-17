@@ -285,6 +285,16 @@ class Database:
             )
             return result.endswith('1')
 
+    async def delete_event(self, event_id: int) -> bool:
+        """Полностью удаляет мероприятие и связанные билеты.
+        list_access и story_submissions удаляются каскадно (ON DELETE CASCADE).
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute('DELETE FROM tickets WHERE event_id = $1', event_id)
+                result = await conn.execute('DELETE FROM events WHERE id = $1', event_id)
+                return result.endswith('1')
+
     async def update_event(self, event_id: int, *, name: str = None, date: datetime = None,
                            post_url: str = None, price_list: int = None,
                            price_nolist: int = None) -> bool:

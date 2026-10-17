@@ -281,10 +281,21 @@ async def _notify_admins(bot, sub_id, event, tg_user, link, file_id, ai, reason,
          InlineKeyboardButton(text="❌ Отклонить", callback_data=f"lsr_{sub_id}_no")],
         [InlineKeyboardButton(text="🚫 Отклонить и снять со списков", callback_data=f"lsr_{sub_id}_ban")],
     ])
+    caption = "\n".join(lines)
+
+    # Если задан отдельный чат/форум — отправляем туда, чтобы не засорять личные чаты админов.
+    review_chat = getattr(config, "ADMIN_REVIEW_CHAT_ID", None)
+    if review_chat:
+        try:
+            await bot.send_photo(review_chat, photo=file_id, caption=caption, reply_markup=markup)
+            return
+        except Exception as e:
+            logger.warning("Не удалось отправить заявку в чат проверки %s: %s — fallback в лички", review_chat, e)
+
     delivered = 0
     for admin_id in await _admin_ids():
         try:
-            await bot.send_photo(admin_id, photo=file_id, caption="\n".join(lines), reply_markup=markup)
+            await bot.send_photo(admin_id, photo=file_id, caption=caption, reply_markup=markup)
             delivered += 1
         except Exception as e:
             logger.warning("Не удалось отправить заявку админу %s: %s", admin_id, e)

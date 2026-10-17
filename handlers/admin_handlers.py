@@ -10,7 +10,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from database import db, SoldOutError
-from keyboards import stats_menu_keyboard, manage_events_keyboard, manage_event_actions_keyboard, admin_menu
+from keyboards import (
+    stats_menu_keyboard,
+    manage_events_keyboard,
+    manage_event_actions_keyboard,
+    confirm_delete_event_keyboard,
+    admin_menu,
+)
 from utils import generate_unique_ticket_code, make_ticket_qr
 import config
 from listcheck.rules import parse_vk_post_url
@@ -652,6 +658,56 @@ async def toggle_event_active(callback: CallbackQuery):
         text += f"🔗 {event['post_url']}\n"
 
     await callback.message.edit_text(text, reply_markup=manage_event_actions_keyboard(event))
+
+
+@router.callback_query(F.data.regexp(r"^delete_event_\d+$"))
+async def ask_delete_event(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    event = await db.get_event(event_id)
+    if not event:
+        await callback.answer("❌ Не найдено", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"⚠️ Удалить мероприятие «{event['name']}» навсегда?\n\n"
+        f"Будут удалены все билеты, заявки по списку и данные проверки сторис.\n"
+        f"Это действие нельзя отменить.",
+        reply_markup=confirm_delete_event_keyboard(event_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^confirm_delete_event_\d+$"))
+async def confirm_delete_event(callback: CallbackQuery):
+    if not await is_admin_id(callback.from_user.id):
+        await callback.answer("❌ Нет прав", show_alert=True)
+        return
+
+    event_id = int(callback.data.rsplit("_", 1)[1])
+    event = await db.get_event(event_id)
+    if not event:
+        await callback.answer("❌ Уже удалено или не найдено", show_alert=True)
+        return
+
+    name = event["name"]
+    ok = await db.delete_event(event_id)
+    if not ok:
+        await callback.answer("❌ Не удалось удалить", show_alert=True)
+        return
+
+    await callback.answer("✅ Удалено")
+    events = await db.get_all_events()
+    if not events:
+        await callback.message.edit_text(f"🗑 Мероприятие «{name}» удалено.\n\n📋 Больше мероприятий нет.")
+        return
+    await callback.message.edit_text(
+        f"🗑 Мероприятие «{name}» удалено.\n\n📋 Управление мероприятиями\n\nВыберите событие:",
+        reply_markup=manage_events_keyboard(events),
+    )
 
 
 @router.callback_query(F.data.regexp(r"^edit_name_\d+$"))

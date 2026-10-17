@@ -37,12 +37,18 @@ LINK_CODE_TTL_MIN = 15          # сколько минут живёт код п
 # ИИ для проверки скриншотов сторис: gemini | anthropic
 AI_PROVIDER = (os.getenv("AI_PROVIDER") or "gemini").strip().lower()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip() or None
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 ANTHROPIC_API_KEY = (os.getenv("ANTHROPIC_API_KEY") or "").strip() or None
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-5-5")
 
 STORY_MAX_ATTEMPTS = int(os.getenv("STORY_MAX_ATTEMPTS", "3"))      # попыток отправить скриншот на событие
 STORY_AUDIT_PERCENT = int(os.getenv("STORY_AUDIT_PERCENT", "15"))   # % авто-одобренных, которые уходят админу на аудит
+
+# Отдельный чат/форум для проверки сторис (если ИИ сомневается или аудит).
+# Числовой id группы/супергруппы (-100...). Бот должен быть админом.
+# Если не задан — заявки по-прежнему уходят каждому админу в личку.
+_review_chat = (os.getenv("ADMIN_REVIEW_CHAT_ID") or "").strip()
+ADMIN_REVIEW_CHAT_ID = int(_review_chat) if re.fullmatch(r"-?\d+", _review_chat) else None
 
 
 def list_config_problems() -> List[str]:

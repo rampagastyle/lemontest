@@ -126,8 +126,17 @@ def manage_event_actions_keyboard(event):
     if config.LIST_VERIFICATION:
         rows.append([InlineKeyboardButton(text="👥 Пост ВК (друзья)", callback_data=f"edit_vkpost_{event_id}")])
         rows.append([InlineKeyboardButton(text="📋 Квота по списку", callback_data=f"edit_quota_{event_id}")])
+    rows.append([InlineKeyboardButton(text="🗑 Удалить мероприятие", callback_data=f"delete_event_{event_id}")])
     rows.append([InlineKeyboardButton(text="◀️ К списку", callback_data="manage_events_list")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_delete_event_keyboard(event_id: int):
+    """Подтверждение полного удаления мероприятия."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ Да, удалить навсегда", callback_data=f"confirm_delete_event_{event_id}")],
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"manage_event_{event_id}")],
+    ])
 
 
 def stats_menu_keyboard(events):
