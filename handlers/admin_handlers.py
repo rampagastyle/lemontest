@@ -13,6 +13,7 @@ from database import db, SoldOutError
 from keyboards import stats_menu_keyboard, manage_events_keyboard, manage_event_actions_keyboard, admin_menu
 from utils import generate_unique_ticket_code, make_ticket_qr
 import config
+from listcheck.rules import parse_vk_post_url
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -22,10 +23,11 @@ class CreateEvent(StatesGroup):
     name = State()
     date = State()
     post_url = State()
-    vk_post_url = State()
+    vk_post = State()
     price_list = State()
     price_nolist = State()
     total_tickets = State()
+    list_quota = State()
 
 
 class AddAdmin(StatesGroup):
@@ -138,25 +140,35 @@ async def process_event_post_url(message: Message, state: FSMContext):
         return
 
     await state.update_data(post_url=url)
-    await state.set_state(CreateEvent.vk_post_url)
-    await message.answer("🔗 Ссылка на пост в сообществе VK (для проверки списков):\nНапример: https://vk.com/wall-123456_789 или пропустить (/skip)")
-
-
-@router.message(CreateEvent.vk_post_url, F.text)
-async def process_event_vk_url(message: Message, state: FSMContext):
-    vk_url = message.text.strip()
-
-    # Пропуск
-    if vk_url.lower() in ['/skip', 'skip']:
-        await state.update_data(vk_post_url=None)
+    if config.LIST_VERIFICATION:
+        await state.set_state(CreateEvent.vk_post)
+        await message.answer("👥 Ссылка на пост этого мероприятия в сообществе LEMON ВК "
+                             "(под ним гости отмечают друзей), например https://vk.com/wall-123_456.\n"
+                             "Если поста нет, отправьте «-»:")
+    else:
         await state.set_state(CreateEvent.price_list)
         await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
-        return
 
-    # VK-ссылку сохраняем как есть, без валидации (упростим)
-    await state.update_data(vk_post_url=vk_url)
+
+@router.message(CreateEvent.vk_post, F.text)
+async def process_event_vk_post(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if text in ("-", "—", "нет"):
+        await state.update_data(vk_post_url=None, vk_post_owner=None, vk_post_id=None)
+    else:
+        parsed = parse_vk_post_url(text)
+        if not parsed:
+            await message.answer("❌ Нужна ссылка вида https://vk.com/wall-123_456 или «-»")
+            return
+        owner, post_id, url = parsed
+        if config.VK_GROUP_ID and owner != -config.VK_GROUP_ID:
+            await message.answer(f"❌ Пост должен быть на стене сообщества LEMON (id -{config.VK_GROUP_ID}), "
+                                 "иначе бот не увидит комментарии.")
+            return
+        await state.update_data(vk_post_url=url, vk_post_owner=owner, vk_post_id=post_id)
+
     await state.set_state(CreateEvent.price_list)
-    await message.answer(f"✅ VK-пост сохранена!\n\n📋 Цена «По списку» (₽, 0 — бесплатно):")
+    await message.answer("📋 Цена «По списку» (₽, 0 — бесплатно):")
 
 
 @router.message(CreateEvent.price_list, F.text)
@@ -190,6 +202,33 @@ async def process_event_tickets(message: Message, state: FSMContext):
         await message.answer("❌ Введите целое число больше 0")
         return
 
+    if config.LIST_VERIFICATION:
+        await state.update_data(total_tickets=total_tickets)
+        await state.set_state(CreateEvent.list_quota)
+        await message.answer("📋 Сколько билетов можно продать «По списку»? (0 — без лимита)\n"
+                             "Это ваш потолок потерь: максимум убытка = квота × разница цен.")
+        return
+
+    await finish_event_creation(message, state, total_tickets, None)
+
+
+@router.message(CreateEvent.list_quota, F.text)
+async def process_event_list_quota(message: Message, state: FSMContext):
+    quota = parse_price(message.text)
+    if quota is None:
+        await message.answer("❌ Введите целое число (0 — без лимита)")
+        return
+
+    data = await state.get_data()
+    total_tickets = data['total_tickets']
+    if quota > total_tickets:
+        await message.answer(f"❌ Квота не может быть больше общего числа билетов ({total_tickets})")
+        return
+
+    await finish_event_creation(message, state, total_tickets, quota or None)
+
+
+async def finish_event_creation(message: Message, state: FSMContext, total_tickets: int, list_quota):
     data = await state.get_data()
 
     event_id = await db.create_event(
@@ -199,24 +238,30 @@ async def process_event_tickets(message: Message, state: FSMContext):
         price_list=data['price_list'],
         price_nolist=data['price_nolist'],
         total_tickets=total_tickets,
-        created_by=message.from_user.id
+        created_by=message.from_user.id,
+        vk_post_url=data.get('vk_post_url'),
+        vk_post_owner=data.get('vk_post_owner'),
+        vk_post_id=data.get('vk_post_id'),
+        list_quota=list_quota
     )
 
-    # Привязываем VK-пост если был указан
-    vk_post_url = data.get('vk_post_url')
-    if vk_post_url:
-        await db.link_vk_post_to_event(event_id, vk_post_url)
-
     await state.clear()
-    vk_info = f"\n🔗 VK-пост привязан" if vk_post_url else ""
-    await message.answer(
+    text = (
         f"✅ Мероприятие создано! ID: {event_id}\n\n"
         f"🎉 {data['name']}\n"
         f"📅 {data['date'].strftime('%d.%m.%Y %H:%M')}\n"
         f"📋 По списку — {data['price_list']}₽\n"
         f"🚪 Без списка — {data['price_nolist']}₽\n"
-        f"🎫 Билетов: {total_tickets}{vk_info}"
+        f"🎫 Билетов: {total_tickets}"
     )
+    if config.LIST_VERIFICATION:
+        if list_quota:
+            diff = max(0, data['price_nolist'] - data['price_list'])
+            text += f"\n📋 Квота по списку: {list_quota} (максимум потерь: {list_quota * diff}₽)"
+        else:
+            text += "\n📋 Квота по списку: без лимита"
+        text += f"\n👥 Пост ВК: {data.get('vk_post_url') or 'не указан (друзья не проверяются)'}"
+    await message.answer(text)
 
 
 # ---------- Подарочные билеты ----------
@@ -563,6 +608,12 @@ async def manage_event_detail(callback: CallbackQuery):
     )
     if event.get('post_url'):
         text += f"🔗 {event['post_url']}\n"
+    if config.LIST_VERIFICATION:
+        used = await db.count_list_tickets(event_id)
+        quota = event.get('list_quota')
+        text += (f"📋 Квота по списку: {used}/{quota}\n" if quota
+                 else f"📋 Квота по списку: без лимита (выдано {used})\n")
+        text += f"👥 Пост ВК: {event.get('vk_post_url') or 'не указан'}\n"
 
     await callback.message.edit_text(text, reply_markup=manage_event_actions_keyboard(event))
     await callback.answer()

@@ -1,3 +1,4 @@
+import secrets
 import asyncpg
 from datetime import datetime
 from typing import Optional, List
@@ -10,6 +11,14 @@ class SoldOutError(Exception):
 
 class AlreadyHasTicketError(Exception):
     """У пользователя уже есть купленный билет на это мероприятие."""
+
+
+class ListQuotaError(Exception):
+    """Места «По списку» на это мероприятие закончились."""
+
+
+class ListLimitError(Exception):
+    """У пользователя уже есть билет «По списку» на это мероприятие (один на человека)."""
 
 
 class Database:
@@ -84,57 +93,6 @@ class Database:
                 )
             ''')
 
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_vk_links (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT UNIQUE NOT NULL,
-                    vk_username TEXT NOT NULL,
-                    vk_profile_url TEXT,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    updated_at TIMESTAMP DEFAULT NOW()
-                )
-            ''')
-
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS events_vk (
-                    id SERIAL PRIMARY KEY,
-                    event_id INTEGER UNIQUE REFERENCES events(id) ON DELETE CASCADE,
-                    vk_post_url TEXT NOT NULL,
-                    vk_post_id TEXT,
-                    vk_owner_id TEXT,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            ''')
-
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS list_checks (
-                    id SERIAL PRIMARY KEY,
-                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
-                    user_id BIGINT NOT NULL,
-                    vk_username TEXT,
-                    status TEXT DEFAULT 'pending',
-                    screenshot_hash TEXT,
-                    gemini_analysis JSONB,
-                    author_match BOOLEAN,
-                    has_community_tag BOOLEAN,
-                    has_event_poster BOOLEAN,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    checked_at TIMESTAMP,
-                    checked_by_admin BIGINT
-                )
-            ''')
-
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS screenshot_hashes (
-                    id SERIAL PRIMARY KEY,
-                    event_id INTEGER REFERENCES events(id) ON DELETE CASCADE,
-                    user_id BIGINT NOT NULL,
-                    hash TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(event_id, user_id, hash)
-                )
-            ''')
-
             # ---- Миграции для баз, созданных старой версией бота (безопасно запускать повторно) ----
             await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS post_url TEXT')
             await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS price_list INTEGER')
@@ -169,6 +127,94 @@ class Database:
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_tickets_user ON tickets(user_id)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_tickets_event ON tickets(event_id)')
 
+            # ---- Проверка списков ----
+            await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS vk_post_url TEXT')
+            await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS vk_post_owner BIGINT')
+            await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS vk_post_id BIGINT')
+            await conn.execute('ALTER TABLE events ADD COLUMN IF NOT EXISTS list_quota INTEGER')
+            await conn.execute('ALTER TABLE tickets ADD COLUMN IF NOT EXISTS list_verified BOOLEAN DEFAULT FALSE')
+
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS vk_links (
+                    user_id BIGINT PRIMARY KEY,
+                    vk_id BIGINT UNIQUE NOT NULL,
+                    vk_name TEXT,
+                    linked_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS vk_link_codes (
+                    code TEXT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS vk_comments (
+                    owner_id BIGINT NOT NULL,
+                    comment_id BIGINT NOT NULL,
+                    post_id BIGINT NOT NULL,
+                    vk_id BIGINT NOT NULL,
+                    valid BOOLEAN NOT NULL,
+                    tagged INTEGER DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (owner_id, comment_id)
+                )
+            ''')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_vk_comments_lookup ON vk_comments(vk_id, owner_id, post_id)')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS list_access (
+                    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    status TEXT NOT NULL,
+                    source TEXT,
+                    note TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (event_id, user_id)
+                )
+            ''')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS story_submissions (
+                    id SERIAL PRIMARY KEY,
+                    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL,
+                    file_id TEXT,
+                    file_unique_id TEXT,
+                    img_hash TEXT,
+                    ai_json TEXT,
+                    decision TEXT NOT NULL,
+                    note TEXT,
+                    reviewed_by BIGINT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_story_event ON story_submissions(event_id)')
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS list_bans (
+                    user_id BIGINT PRIMARY KEY,
+                    reason TEXT,
+                    banned_by BIGINT,
+                    banned_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+
+            # Перенос постов ВК из прежней версии проверки списков (таблица events_vk), если она есть.
+            # Переносятся только ссылки вида wall-123_456; повторный запуск ничего не меняет.
+            await conn.execute('''
+                DO $$
+                BEGIN
+                    IF to_regclass('events_vk') IS NOT NULL THEN
+                        UPDATE events e
+                        SET vk_post_url = 'https://vk.com/wall' || substring(v.vk_post_url from 'wall(-?[0-9]+_[0-9]+)'),
+                            vk_post_owner = substring(v.vk_post_url from 'wall(-?[0-9]+)_[0-9]+')::bigint,
+                            vk_post_id = substring(v.vk_post_url from 'wall-?[0-9]+_([0-9]+)')::bigint
+                        FROM events_vk v
+                        WHERE v.event_id = e.id AND e.vk_post_url IS NULL
+                          AND v.vk_post_url ~ 'wall-?[0-9]+_[0-9]+';
+                    END IF;
+                END $$;
+            ''')
+
     # ---------- Админы ----------
 
     async def add_admin(self, user_id: int, username: str = None):
@@ -194,14 +240,18 @@ class Database:
 
     async def create_event(self, name: str, date: datetime, post_url: str,
                            price_list: int, price_nolist: int,
-                           total_tickets: int, created_by: int) -> int:
+                           total_tickets: int, created_by: int,
+                           vk_post_url: str = None, vk_post_owner: int = None,
+                           vk_post_id: int = None, list_quota: int = None) -> int:
         async with self.pool.acquire() as conn:
             event_id = await conn.fetchval('''
                 INSERT INTO events (name, date, post_url, price_list, price_nolist,
-                                    total_tickets, available_tickets, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
+                                    total_tickets, available_tickets, created_by,
+                                    vk_post_url, vk_post_owner, vk_post_id, list_quota)
+                VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $9, $10, $11)
                 RETURNING id
-            ''', name, date, post_url, price_list, price_nolist, total_tickets, created_by)
+            ''', name, date, post_url, price_list, price_nolist, total_tickets, created_by,
+                vk_post_url, vk_post_owner, vk_post_id, list_quota)
             return event_id
 
     async def get_active_events(self) -> List[dict]:
@@ -289,7 +339,8 @@ class Database:
 
     async def create_ticket(self, event_id: int, user_id: int, username: str,
                             qr_code: str, ticket_type: str = 'purchased', gifted_by: int = None,
-                            ticket_tier: str = None, price: int = None) -> int:
+                            ticket_tier: str = None, price: int = None,
+                            list_verified: bool = False) -> int:
         """Атомарно выдаёт билет.
 
         ticket_type: 'purchased' | 'gifted'
@@ -311,12 +362,35 @@ class Database:
                 if updated is None:
                     raise SoldOutError()
 
+                # Строка события уже заблокирована UPDATE-ом выше, поэтому проверки квоты
+                # «По списку» и лимита «один на человека» не гоняются между покупателями.
+                if ticket_type == 'purchased' and ticket_tier == 'list' and config.LIST_VERIFICATION:
+                    quota = await conn.fetchval('SELECT list_quota FROM events WHERE id = $1', event_id)
+                    if quota is not None:
+                        used = await conn.fetchval('''
+                            SELECT COUNT(*) FROM tickets
+                            WHERE event_id = $1 AND ticket_type = 'purchased'
+                              AND ticket_tier = 'list' AND status = 'active'
+                        ''', event_id)
+                        if used >= quota:
+                            raise ListQuotaError()
+                    has_list = await conn.fetchval('''
+                        SELECT EXISTS(
+                            SELECT 1 FROM tickets
+                            WHERE event_id = $1 AND user_id = $2 AND ticket_type = 'purchased'
+                              AND ticket_tier = 'list' AND status = 'active'
+                        )
+                    ''', event_id, user_id)
+                    if has_list:
+                        raise ListLimitError()
+
                 ticket_id = await conn.fetchval('''
                     INSERT INTO tickets (event_id, user_id, username, qr_code, ticket_type,
-                                         ticket_tier, price, gifted_by, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
+                                         ticket_tier, price, gifted_by, status, list_verified)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9)
                     RETURNING id
-                ''', event_id, user_id, username, qr_code, ticket_type, ticket_tier, price, gifted_by)
+                ''', event_id, user_id, username, qr_code, ticket_type, ticket_tier, price, gifted_by,
+                    list_verified)
 
                 return ticket_id
 
@@ -371,7 +445,8 @@ class Database:
                 # FOR UPDATE — два админа не смогут одновременно активировать один билет
                 ticket = await conn.fetchrow('''
                     SELECT t.*, e.name as event_name, e.date as event_date,
-                           e.is_active as event_is_active
+                           e.is_active as event_is_active,
+                           e.price_list as event_price_list, e.price_nolist as event_price_nolist
                     FROM tickets t
                     JOIN events e ON t.event_id = e.id
                     WHERE t.qr_code = $1
@@ -437,6 +512,189 @@ class Database:
             ''')
             return [dict(row) for row in rows]
 
+    # ---------- Проверка списков ----------
+
+    async def create_link_code(self, user_id: int) -> str:
+        """Одноразовый код, который человек отправляет в личку сообщества ВК, чтобы привязать аккаунт."""
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        code = "LEMON-" + "".join(secrets.choice(alphabet) for _ in range(6))
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM vk_link_codes WHERE user_id = $1 OR created_at < NOW() - INTERVAL '1 day'",
+                    user_id)
+                await conn.execute('INSERT INTO vk_link_codes (code, user_id) VALUES ($1, $2)', code, user_id)
+        return code
+
+    async def consume_link_code(self, code: str) -> Optional[int]:
+        """Возвращает Telegram user_id, если код существует и ещё не просрочен; код удаляется."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                DELETE FROM vk_link_codes WHERE code = $1
+                RETURNING user_id, (created_at > NOW() - make_interval(mins => $2::int)) AS fresh
+            ''', code, config.LINK_CODE_TTL_MIN)
+            if row and row['fresh']:
+                return row['user_id']
+            return None
+
+    async def link_vk(self, user_id: int, vk_id: int, vk_name: str) -> str:
+        """'ok' | 'vk_taken' (этот ВК уже привязан к другому Telegram) | 'user_has_other' (у Telegram уже другой ВК)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                owner = await conn.fetchval('SELECT user_id FROM vk_links WHERE vk_id = $1', vk_id)
+                if owner is not None:
+                    return 'ok' if owner == user_id else 'vk_taken'
+                current = await conn.fetchval('SELECT vk_id FROM vk_links WHERE user_id = $1', user_id)
+                if current is not None:
+                    return 'user_has_other'
+                await conn.execute(
+                    'INSERT INTO vk_links (user_id, vk_id, vk_name) VALUES ($1, $2, $3)', user_id, vk_id, vk_name)
+                return 'ok'
+
+    async def get_vk_link(self, user_id: int) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM vk_links WHERE user_id = $1', user_id)
+            return dict(row) if row else None
+
+    async def get_user_by_vk(self, vk_id: int) -> Optional[int]:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('SELECT user_id FROM vk_links WHERE vk_id = $1', vk_id)
+
+    async def get_event_by_vk_post(self, owner_id: int, post_id: int) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT * FROM events WHERE vk_post_owner = $1 AND vk_post_id = $2 ORDER BY id DESC LIMIT 1',
+                owner_id, post_id)
+            return dict(row) if row else None
+
+    async def save_vk_comment(self, owner_id: int, comment_id: int, post_id: int,
+                              vk_id: int, valid: bool, tagged: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO vk_comments (owner_id, comment_id, post_id, vk_id, valid, tagged)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (owner_id, comment_id) DO UPDATE
+                SET post_id = EXCLUDED.post_id, vk_id = EXCLUDED.vk_id,
+                    valid = EXCLUDED.valid, tagged = EXCLUDED.tagged, updated_at = NOW()
+            ''', owner_id, comment_id, post_id, vk_id, valid, tagged)
+
+    async def mark_vk_comment_deleted(self, owner_id: int, comment_id: int) -> Optional[int]:
+        """Комментарий удалён: снимает отметку valid. Возвращает vk_id автора, если запись была валидной."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                UPDATE vk_comments SET valid = FALSE, updated_at = NOW()
+                WHERE owner_id = $1 AND comment_id = $2 AND valid
+                RETURNING vk_id
+            ''', owner_id, comment_id)
+
+    async def has_valid_vk_comment(self, vk_id: int, owner_id: int, post_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT EXISTS(
+                    SELECT 1 FROM vk_comments
+                    WHERE vk_id = $1 AND owner_id = $2 AND post_id = $3 AND valid
+                )
+            ''', vk_id, owner_id, post_id)
+
+    async def get_list_access(self, event_id: int, user_id: int) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT * FROM list_access WHERE event_id = $1 AND user_id = $2', event_id, user_id)
+            return dict(row) if row else None
+
+    async def set_list_access(self, event_id: int, user_id: int, status: str, source: str, note: str = None):
+        """status: approved | pending | rejected | revoked (путь «сторис»)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO list_access (event_id, user_id, status, source, note)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (event_id, user_id) DO UPDATE
+                SET status = EXCLUDED.status, source = EXCLUDED.source,
+                    note = EXCLUDED.note, updated_at = NOW()
+            ''', event_id, user_id, status, source, note)
+
+    async def count_story_attempts(self, event_id: int, user_id: int) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT COUNT(*) FROM story_submissions
+                WHERE event_id = $1 AND user_id = $2
+                  AND decision IN ('rejected_ai', 'rejected_admin', 'dup')
+            ''', event_id, user_id) or 0
+
+    async def add_story_submission(self, event_id: int, user_id: int, file_id: str, file_unique_id: str,
+                                   img_hash: Optional[str], ai_json: Optional[str],
+                                   decision: str, note: str = None) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                INSERT INTO story_submissions (event_id, user_id, file_id, file_unique_id, img_hash,
+                                               ai_json, decision, note)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING id
+            ''', event_id, user_id, file_id, file_unique_id, img_hash, ai_json, decision, note)
+
+    async def get_story_submission(self, sub_id: int) -> Optional[dict]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM story_submissions WHERE id = $1', sub_id)
+            return dict(row) if row else None
+
+    async def mark_submission_reviewed(self, sub_id: int, admin_id: int, decision: str) -> bool:
+        """True, если именно этот вызов обработал заявку (защита от двойного нажатия двумя админами)."""
+        async with self.pool.acquire() as conn:
+            updated = await conn.fetchval('''
+                UPDATE story_submissions SET reviewed_by = $2, decision = $3
+                WHERE id = $1 AND reviewed_by IS NULL
+                RETURNING id
+            ''', sub_id, admin_id, decision)
+            return updated is not None
+
+    async def get_event_image_hashes(self, event_id: int) -> List[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT user_id, img_hash, file_unique_id FROM story_submissions
+                WHERE event_id = $1 AND decision <> 'dup'
+            ''', event_id)
+            return [dict(row) for row in rows]
+
+    async def is_list_banned(self, user_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('SELECT EXISTS(SELECT 1 FROM list_bans WHERE user_id = $1)', user_id)
+
+    async def ban_list(self, user_id: int, admin_id: int, reason: str = None):
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                'INSERT INTO list_bans (user_id, reason, banned_by) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING',
+                user_id, reason, admin_id)
+
+    async def count_list_tickets(self, event_id: int) -> int:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT COUNT(*) FROM tickets
+                WHERE event_id = $1 AND ticket_type = 'purchased' AND ticket_tier = 'list' AND status = 'active'
+            ''', event_id) or 0
+
+    async def user_has_list_ticket(self, user_id: int, event_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval('''
+                SELECT EXISTS(
+                    SELECT 1 FROM tickets
+                    WHERE event_id = $1 AND user_id = $2 AND ticket_type = 'purchased'
+                      AND ticket_tier = 'list' AND status = 'active'
+                )
+            ''', event_id, user_id)
+
+    async def set_event_vk_post(self, event_id: int, url: Optional[str],
+                                owner: Optional[int], post_id: Optional[int]) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                'UPDATE events SET vk_post_url = $2, vk_post_owner = $3, vk_post_id = $4 WHERE id = $1',
+                event_id, url, owner, post_id)
+            return result.endswith('1')
+
+    async def set_event_list_quota(self, event_id: int, quota: Optional[int]) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute('UPDATE events SET list_quota = $2 WHERE id = $1', event_id, quota)
+            return result.endswith('1')
+
     # ---------- Поддержка ----------
 
     async def create_support_request(self, user_id: int, username: str, message: str) -> int:
@@ -447,126 +705,6 @@ class Database:
                 RETURNING id
             ''', user_id, username, message)
             return request_id
-
-    # ---------- VK-интеграция ----------
-
-    async def link_vk_account(self, user_id: int, vk_username: str, vk_profile_url: str = None) -> bool:
-        """Привязывает VK-аккаунт к пользователю Telegram."""
-        async with self.pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO user_vk_links (user_id, vk_username, vk_profile_url, updated_at)
-                VALUES ($1, $2, $3, NOW())
-                ON CONFLICT (user_id) DO UPDATE
-                SET vk_username = $2, vk_profile_url = $3, updated_at = NOW()
-            ''', user_id, vk_username, vk_profile_url)
-            return True
-
-    async def get_vk_username(self, user_id: int) -> Optional[str]:
-        """Получает привязанный VK-username пользователя."""
-        async with self.pool.acquire() as conn:
-            return await conn.fetchval(
-                'SELECT vk_username FROM user_vk_links WHERE user_id = $1',
-                user_id
-            )
-
-    async def link_vk_post_to_event(self, event_id: int, vk_post_url: str, vk_post_id: str = None, vk_owner_id: str = None) -> bool:
-        """Привязывает VK-пост к мероприятию."""
-        async with self.pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO events_vk (event_id, vk_post_url, vk_post_id, vk_owner_id)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (event_id) DO UPDATE
-                SET vk_post_url = $2, vk_post_id = $3, vk_owner_id = $4
-            ''', event_id, vk_post_url, vk_post_id, vk_owner_id)
-            return True
-
-    async def get_event_vk_post(self, event_id: int) -> Optional[dict]:
-        """Получает VK-пост события."""
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                'SELECT * FROM events_vk WHERE event_id = $1',
-                event_id
-            )
-            return dict(row) if row else None
-
-    async def create_list_check(self, event_id: int, user_id: int, vk_username: str,
-                               screenshot_hash: str, gemini_analysis: dict = None,
-                               author_match: bool = False, has_community_tag: bool = False,
-                               has_event_poster: bool = False) -> int:
-        """Создаёт запись проверки списка."""
-        import json
-        async with self.pool.acquire() as conn:
-            check_id = await conn.fetchval('''
-                INSERT INTO list_checks
-                (event_id, user_id, vk_username, screenshot_hash, gemini_analysis,
-                 author_match, has_community_tag, has_event_poster, status, checked_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
-                RETURNING id
-            ''', event_id, user_id, vk_username, screenshot_hash,
-            json.dumps(gemini_analysis) if gemini_analysis else None,
-            author_match, has_community_tag, has_event_poster)
-            return check_id
-
-    async def approve_list_check(self, check_id: int, admin_id: int) -> bool:
-        """Одобряет проверку списка администратором."""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute('''
-                UPDATE list_checks
-                SET status = 'approved', checked_by_admin = $2, checked_at = NOW()
-                WHERE id = $1
-            ''', check_id, admin_id)
-            return result.endswith('1')
-
-    async def reject_list_check(self, check_id: int, admin_id: int) -> bool:
-        """Отклоняет проверку списка."""
-        async with self.pool.acquire() as conn:
-            result = await conn.execute('''
-                UPDATE list_checks
-                SET status = 'rejected', checked_by_admin = $2, checked_at = NOW()
-                WHERE id = $1
-            ''', check_id, admin_id)
-            return result.endswith('1')
-
-    async def check_screenshot_duplicate(self, event_id: int, user_id: int, screenshot_hash: str) -> bool:
-        """Проверяет, не отправлял ли пользователь этот скриншот уже."""
-        async with self.pool.acquire() as conn:
-            exists = await conn.fetchval('''
-                SELECT EXISTS(
-                    SELECT 1 FROM screenshot_hashes
-                    WHERE event_id = $1 AND user_id = $2 AND hash = $3
-                )
-            ''', event_id, user_id, screenshot_hash)
-            return exists
-
-    async def add_screenshot_hash(self, event_id: int, user_id: int, screenshot_hash: str) -> bool:
-        """Добавляет хеш скриншота в дедупликацию."""
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute('''
-                    INSERT INTO screenshot_hashes (event_id, user_id, hash)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (event_id, user_id, hash) DO NOTHING
-                ''', event_id, user_id, screenshot_hash)
-                return True
-            except Exception:
-                return False
-
-    async def get_user_list_checks(self, user_id: int, event_id: int = None) -> List[dict]:
-        """Получает все проверки списков пользователя."""
-        async with self.pool.acquire() as conn:
-            if event_id:
-                rows = await conn.fetch('''
-                    SELECT * FROM list_checks
-                    WHERE user_id = $1 AND event_id = $2
-                    ORDER BY created_at DESC
-                ''', user_id, event_id)
-            else:
-                rows = await conn.fetch('''
-                    SELECT * FROM list_checks
-                    WHERE user_id = $1
-                    ORDER BY created_at DESC
-                ''', user_id)
-            return [dict(row) for row in rows]
 
 
 db = Database()

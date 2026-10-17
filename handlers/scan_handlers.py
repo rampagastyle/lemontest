@@ -21,6 +21,7 @@ from aiogram.types import Message
 from database import db
 from keyboards import admin_menu, scan_menu
 from utils import TICKET_PREFIX
+from listcheck.service import door_list_check
 from utils.formatting import ticket_kind, TIER_LIST
 
 logger = logging.getLogger(__name__)
@@ -45,13 +46,25 @@ def format_scan_result(ticket: dict) -> str:
         f"\n🏷 {ticket_kind(ticket)}"
     )
 
+    list_check = ticket.get('list_check')       # перепроверка условий списка (только для проверенных «списочных» билетов)
+
     if ticket['just_used']:
-        head = "✅ ПРОХОД РАЗРЕШЁН"
-        extra = ""
-        if ticket.get('ticket_tier') == TIER_LIST:
-            extra += "\n\n📋 Сверьте гостя со списком"
-        if not ticket['event_is_active']:
-            extra += "\n\n⚠️ Мероприятие помечено как неактивное"
+        if list_check and list_check.get('problems'):
+            amount = f" {list_check['surcharge']}₽" if list_check.get('surcharge') else ""
+            head = f"⚠️ ДОПЛАТА{amount}: условия списка не выполнены"
+            extra = "\n\n" + "\n".join(f"• {p}" for p in list_check['problems']) + "\n\nПроход — после доплаты."
+        else:
+            head = "✅ ПРОХОД РАЗРЕШЁН"
+            extra = ""
+            if list_check is not None:
+                if list_check.get('error') or list_check.get('unknown'):
+                    extra += "\n\n⚠️ Не удалось перепроверить условия списка (сбой сервиса) — сверьте гостя вручную"
+                else:
+                    extra += "\n\n✅ Условия списка подтверждены"
+            elif ticket.get('ticket_tier') == TIER_LIST:
+                extra += "\n\n📋 Сверьте гостя со списком"
+            if not ticket['event_is_active']:
+                extra += "\n\n⚠️ Мероприятие помечено как неактивное"
     elif ticket['used_at']:
         used_str = ticket['used_at'].strftime("%d.%m.%Y %H:%M")
         head = "❌ БИЛЕТ УЖЕ ИСПОЛЬЗОВАН"
@@ -72,6 +85,9 @@ async def check_code_and_reply(message: Message, code: str):
     if not ticket:
         await message.answer("❌ Билет не найден")
         return
+
+    if ticket.get('just_used'):
+        ticket['list_check'] = await door_list_check(message.bot, ticket)
 
     await message.answer(format_scan_result(ticket))
 

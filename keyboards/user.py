@@ -1,17 +1,22 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
+import config
 from utils.formatting import price_range, event_price, TIER_LIST, TIER_NOLIST
 
 
 def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
+    if config.LIST_VERIFICATION:
+        keyboard = [
             [KeyboardButton(text="🎫 Мероприятия"), KeyboardButton(text="🎟 Мои билеты")],
             [KeyboardButton(text="📋 Проверить список"), KeyboardButton(text="💬 Поддержка")],
-            [KeyboardButton(text="ℹ️ О боте")]
-        ],
-        resize_keyboard=True
-    )
+            [KeyboardButton(text="ℹ️ О боте")],
+        ]
+    else:
+        keyboard = [
+            [KeyboardButton(text="🎫 Мероприятия"), KeyboardButton(text="🎟 Мои билеты")],
+            [KeyboardButton(text="💬 Поддержка"), KeyboardButton(text="ℹ️ О боте")],
+        ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def admin_menu():
@@ -111,15 +116,18 @@ def manage_event_actions_keyboard(event):
     event_id = event['id']
     active = event.get('is_active', True)
     toggle_text = "⏸ Деактивировать" if active else "✅ Активировать"
-    toggle_data = f"toggle_event_{event_id}"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle_text, callback_data=toggle_data)],
+    rows = [
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"toggle_event_{event_id}")],
         [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"edit_name_{event_id}")],
         [InlineKeyboardButton(text="📅 Изменить дату", callback_data=f"edit_date_{event_id}")],
         [InlineKeyboardButton(text="💰 Изменить цены", callback_data=f"edit_prices_{event_id}")],
         [InlineKeyboardButton(text="🎫 Добавить билеты", callback_data=f"add_tickets_{event_id}")],
-        [InlineKeyboardButton(text="◀️ К списку", callback_data="manage_events_list")],
-    ])
+    ]
+    if config.LIST_VERIFICATION:
+        rows.append([InlineKeyboardButton(text="👥 Пост ВК (друзья)", callback_data=f"edit_vkpost_{event_id}")])
+        rows.append([InlineKeyboardButton(text="📋 Квота по списку", callback_data=f"edit_quota_{event_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ К списку", callback_data="manage_events_list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def stats_menu_keyboard(events):

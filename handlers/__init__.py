@@ -1,3 +1,3 @@
-from . import scan_handlers, user_handlers, admin_handlers, list_check_handlers
+from . import scan_handlers, user_handlers, list_handlers, admin_handlers, fallback
 
-__all__ = ['scan_handlers', 'user_handlers', 'admin_handlers', 'list_check_handlers']
+__all__ = ['scan_handlers', 'user_handlers', 'list_handlers', 'admin_handlers', 'fallback']

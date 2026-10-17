@@ -7,13 +7,14 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from database import db, SoldOutError
+from database import db, SoldOutError, ListQuotaError, ListLimitError
 from keyboards import (
     main_menu, admin_menu, events_list_keyboard, event_detail_keyboard,
     confirm_purchase_keyboard, my_tickets_events_keyboard, ticket_keyboard
 )
 from utils import generate_unique_ticket_code, make_ticket_qr
-from utils.formatting import TIER_LABELS, event_price, ticket_kind
+from utils.formatting import TIER_LABELS, TIER_LIST, event_price, ticket_kind
+from listcheck.flow import ensure_list_access
 import config
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ router = Router()
 # Тексты кнопок меню: если пользователь нажал кнопку, пока бот ждёт сообщение в поддержку,
 # то ожидание отменяется, а не отправляется в поддержку как «вопрос».
 MENU_TEXTS = {
-    "🎫 Мероприятия", "🎟 Мои билеты", "💬 Поддержка", "ℹ️ О боте",
+    "🎫 Мероприятия", "🎟 Мои билеты", "💬 Поддержка", "ℹ️ О боте", "📋 Проверить список",
     "➕ Создать событие", "📋 Управление", "🎁 Выдать билет", "📊 Статистика",
     "✅ Проверка билетов", "⏹ Выключить проверку", "👥 Добавить админа",
 }
@@ -111,6 +112,11 @@ async def process_buy_ticket(callback: CallbackQuery):
         await callback.answer("❌ Билеты закончились", show_alert=True)
         return
 
+    # «По списку» доступен только после проверки условий (подписки, друзья в ВК или сторис)
+    if tier == TIER_LIST and config.LIST_VERIFICATION:
+        if not await ensure_list_access(callback, event):
+            return
+
     already = await db.count_user_tickets_for_event(callback.from_user.id, event_id)
 
     warn = ""
@@ -146,6 +152,12 @@ async def confirm_purchase(callback: CallbackQuery):
         await callback.answer("❌ Мероприятие не найдено", show_alert=True)
         return
 
+    # Повторная проверка на сервере: кнопку подтверждения нельзя использовать в обход условий
+    list_checked = tier == TIER_LIST and config.LIST_VERIFICATION
+    if list_checked:
+        if not await ensure_list_access(callback, event):
+            return
+
     qr_code = generate_unique_ticket_code()
 
     try:
@@ -156,10 +168,19 @@ async def confirm_purchase(callback: CallbackQuery):
             qr_code=qr_code,
             ticket_type='purchased',
             ticket_tier=tier,
-            price=event_price(event, tier)
+            price=event_price(event, tier),
+            list_verified=list_checked
         )
     except SoldOutError:
         await callback.answer("❌ Билеты закончились", show_alert=True)
+        return
+    except ListQuotaError:
+        await callback.answer("😔 Места «По списку» закончились. Билет «Без списка» ещё можно купить.",
+                              show_alert=True)
+        return
+    except ListLimitError:
+        await callback.answer("ℹ️ У вас уже есть билет «По списку» на это мероприятие (один на человека).",
+                              show_alert=True)
         return
     except Exception:
         logger.exception("Ticket creation error")
