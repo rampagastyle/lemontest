@@ -24,14 +24,27 @@ class ListState:
     vk_id: Optional[int] = None
     vk_name: Optional[str] = None
     vk_ok: Optional[bool] = None            # None — не удалось проверить
+    friends_available: bool = False         # у события есть пост ВК, под которым считаются друзья
     friends_ok: bool = False
     story_status: Optional[str] = None      # None | pending | approved | rejected | revoked
     story_attempts: int = 0
     errors: List[str] = field(default_factory=list)
 
     @property
+    def story_ok(self) -> bool:
+        return self.story_status == "approved"
+
+    @property
     def path_ok(self) -> bool:
-        return self.friends_ok or self.story_status == "approved"
+        """Дополнительные условия списка.
+
+        LIST_REQUIRE_BOTH=1 (по умолчанию): нужны и друзья, и сторис. Если у события нет поста ВК,
+        друзей проверить негде, и требуется только сторис.
+        LIST_REQUIRE_BOTH=0: достаточно одного из двух.
+        """
+        if config.LIST_REQUIRE_BOTH:
+            return self.story_ok and (self.friends_ok or not self.friends_available)
+        return self.friends_ok or self.story_ok
 
     @property
     def quota_ok(self) -> bool:
@@ -57,8 +70,13 @@ class ListState:
             problems.append("ВК не привязан")
         elif self.vk_ok is False:
             problems.append("не подписан на ВК LEMON")
-        if not self.path_ok:
-            problems.append("не подтверждено условие (3 друга в ВК / сторис)")
+        if config.LIST_REQUIRE_BOTH:
+            if self.friends_available and not self.friends_ok:
+                problems.append("нет 3 отмеченных друзей в ВК")
+            if not self.story_ok:
+                problems.append("сторис не подтверждена")
+        elif not self.path_ok:
+            problems.append("не подтверждено условие (3 друга в ВК или сторис)")
         return problems
 
     def unknown(self) -> bool:
@@ -78,6 +96,7 @@ async def evaluate(bot, user_id: int, event: dict) -> ListState:
         used = await db.count_list_tickets(event_id)
         state.quota_left = max(0, state.quota - used)
     state.has_list_ticket = await db.user_has_list_ticket(user_id, event_id)
+    state.friends_available = bool(event.get("vk_post_owner") and event.get("vk_post_id"))
 
     try:
         state.tg_ok = await is_tg_subscribed(bot, user_id)

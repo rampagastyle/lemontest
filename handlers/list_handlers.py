@@ -135,7 +135,7 @@ async def _start_story(callback: CallbackQuery, event: dict, state: FSMContext):
         await callback.answer("Сторис уже на проверке у администратора", show_alert=True)
         return
     if st.story_attempts >= config.STORY_MAX_ATTEMPTS:
-        await callback.answer("Лимит попыток исчерпан. Отметьте 3 друзей в ВК или возьмите билет «Без списка».",
+        await callback.answer("Лимит попыток исчерпан. Напишите в поддержку или возьмите билет «Без списка».",
                               show_alert=True)
         return
 
@@ -230,7 +230,7 @@ async def story_photo(message: Message, state: FSMContext):
         sub_id = await db.add_story_submission(event_id, uid, photo.file_id, photo.file_unique_id,
                                                img_hash, ai_json, "approved_ai", reason)
         await db.set_list_access(event_id, uid, "approved", "ai", reason)
-        await wait.edit_text("✅ Сторис принята! Условие выполнено.", reply_markup=_check_button(event_id))
+        await wait.edit_text("✅ Сторис принята!", reply_markup=_check_button(event_id))
         if random.random() < config.STORY_AUDIT_PERCENT / 100:
             await _notify_admins(message.bot, sub_id, event, message.from_user, link, photo.file_id, ai, reason, audit=True)
 
@@ -318,14 +318,14 @@ async def review_story(callback: CallbackQuery):
     if action == "ok":
         await db.set_list_access(event_id, uid, "approved", "admin")
         if not was_audit:
-            await _safe_send(callback.bot, uid, "✅ Администратор подтвердил вашу сторис. Условие выполнено!",
+            await _safe_send(callback.bot, uid, "✅ Администратор подтвердил вашу сторис!",
                              reply_markup=_check_button(event_id))
         verdict = "✅ Подтверждено"
     elif action == "no":
         await db.set_list_access(event_id, uid, "rejected", "admin")
         text = ("❌ Сторис не подтверждена, условие снято." if was_audit else "❌ Администратор не подтвердил сторис.")
         await _safe_send(callback.bot, uid, f"{text}\nОсталось попыток: {left}. "
-                                            "Можно отметить 3 друзей в ВК или взять билет «Без списка».",
+                                            "Можно отправить другой скриншот или взять билет «Без списка».",
                          reply_markup=_check_button(event_id))
         verdict = "❌ Отклонено"
     else:

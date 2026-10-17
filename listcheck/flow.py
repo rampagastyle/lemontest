@@ -72,16 +72,23 @@ def build_conditions(event: dict, st: ListState) -> Tuple[str, InlineKeyboardMar
     else:
         lines.append(f"{_mark(st.vk_ok)} Подписка на LEMON во ВКонтакте ({st.vk_name or 'профиль привязан'})")
     lines.append("")
-    lines.append("Плюс одно из двух:")
-    friends_line = f"{_mark(st.friends_ok)} 👥 Отметить 3 друзей в комментарии под постом в ВК"
-    if not event.get("vk_post_url"):
-        friends_line += " (для этого мероприятия недоступно)"
-    lines.append(friends_line)
+    if config.LIST_REQUIRE_BOTH:
+        lines.append("Плюс оба условия:" if st.friends_available else "Плюс условие:")
+    else:
+        lines.append("Плюс одно из двух:")
+    if st.friends_available or not config.LIST_REQUIRE_BOTH:
+        friends_line = f"{_mark(st.friends_ok)} 👥 Отметить 3 друзей в комментарии под постом в ВК"
+        if not st.friends_available:
+            friends_line += " (для этого мероприятия недоступно)"
+        lines.append(friends_line)
     story_marks = {"approved": "✅", "pending": "⏳"}
     story_line = f"{story_marks.get(st.story_status, '❌')} 📸 Сторис с отметкой LEMON (скриншот)"
     if st.story_status == "pending":
         story_line += " — на проверке у администратора"
     lines.append(story_line)
+    story_blocked = st.story_status not in ("approved", "pending") and st.story_attempts >= config.STORY_MAX_ATTEMPTS
+    if story_blocked and (config.LIST_REQUIRE_BOTH or not st.friends_ok):
+        lines.append("⚠️ Попытки отправки сторис закончились. Напишите в поддержку или возьмите билет «Без списка».")
 
     if st.errors:
         lines.append("")

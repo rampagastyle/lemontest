@@ -20,6 +20,8 @@ ADMIN_IDS = [int(id_.strip()) for id_ in os.getenv("ADMIN_IDS", "").split(",") i
 # ---------- Проверка списков (подписки, друзья в ВК, сторис) ----------
 # Выключено по умолчанию: пока флаг не включён, бот работает как раньше.
 LIST_VERIFICATION = _bool("LIST_VERIFICATION", False)
+# 1 — нужны ОБА условия: 3 друга в ВК И сторис (по умолчанию). 0 — достаточно одного из двух.
+LIST_REQUIRE_BOTH = _bool("LIST_REQUIRE_BOTH", True)
 
 # Канал LEMON в Telegram: @name или числовой id (-100...). Бот должен быть админом канала.
 _channel = (os.getenv("LEMON_TG_CHANNEL") or "").strip()
